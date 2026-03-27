@@ -1,0 +1,3 @@
+[default]
+sources = ["file.txt"]
+target = "out"

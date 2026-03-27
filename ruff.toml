@@ -1,0 +1,11 @@
+fix          = true
+indent-width = 2
+line-length  = 100
+
+[lint]
+fixable = ["ALL"]
+ignore  = ["B904", "E501", "E722", "W191", "B911", "B008"]
+select  = ["E", "F", "W", "UP", "I"]
+
+[lint.per-file-ignores]
+"__init__.py"   = ["E402", "F401"]
