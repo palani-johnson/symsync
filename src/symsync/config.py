@@ -4,7 +4,7 @@ from pathlib import Path
 import msgspec
 
 
-class SyncEntry(msgspec.Struct):
+class SyncEntry(msgspec.Struct, omit_defaults=True):
   "configuration for a single sync operation"
 
   sources: c.Sequence[str]
@@ -13,14 +13,11 @@ class SyncEntry(msgspec.Struct):
   target: str
   "target directory for the sync"
 
-  relative: bool = True
-  "whether to use relative paths for the target (default: True)"
-
   groups: set[str] = set()
   "a set of group names this sync group belongs to"
 
 
-class SyncConfig(msgspec.Struct):
+class SyncConfig(msgspec.Struct, omit_defaults=True):
   "A mapping of sync entries, keyed by a unique name."
 
   entries: c.Sequence[SyncEntry]

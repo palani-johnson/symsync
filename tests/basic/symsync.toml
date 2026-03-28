@@ -1,3 +1,3 @@
 [[entries]]
-sources = ["file.txt"]
+sources = ["*.txt"]
 target = "out"

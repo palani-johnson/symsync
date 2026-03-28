@@ -2,7 +2,6 @@ import itertools
 from pathlib import Path
 
 import cyclopts
-import cyclopts.help
 import msgspec
 import rich.box
 import rich.console
@@ -10,6 +9,7 @@ import rich.panel
 import rich.traceback
 
 from .config import SyncConfig
+from .plan import StateItem, plan_link
 
 # Rich console setup
 console = rich.console.Console(tab_size=2)
@@ -34,7 +34,7 @@ def print_error(error: object):
 
 # Cyclopts app setup
 app = cyclopts.App(
-  help_format="md",
+  help_format="rich",
   console=console,
   error_console=error_console,
   error_formatter=error_formatter,
@@ -42,30 +42,57 @@ app = cyclopts.App(
 
 
 @app.default
-def default(path: Path | None = None):
-  sync_config = get_config(path)
-  console.print(sync_config)
+def default():
+  config_path = get_config_path()
+  sync_config = get_config(config_path)
+
+  state_items = list(StateItem.generate(config_path.parent, sync_config))
+  state_hashes = {item.state_file_hash: item for item in state_items}
+
+  state_dir = config_path.parent / ".symsync.state"
+  state_file = state_dir / "state.json"
+  state_store = state_dir / "store"
+
+  if not state_dir.exists():
+    state_store.mkdir(parents=True)
+    state_file.touch()
+
+  if state_dir.is_dir() and state_file.is_file() and state_store.is_dir():
+    # State directory does exist, use it
+    ...
+  else:
+    print_error(
+      f"State directory {state_dir} must not exist or must exist and follow the expected structure"
+    )
+    exit(1)
+
+  for state_item in state_items:
+    for plan_step in plan_link(state_item, state_store):
+      print(plan_step.message)
 
 
-def get_config(path: Path | None):
+def get_config_path():
+  paths = [
+    Path(f"{name}.{ext}")
+    for name, ext in itertools.product(
+      ["symsync"],
+      ["toml", "json", "yaml", "yml"],
+    )
+  ]
+
+  path = next((p for p in paths if p.is_file()), None)
+
   if path is None:
-    paths = [
-      Path(f"{name}.{ext}")
-      for name, ext in itertools.product(
-        ["symsync", ".symsync"],
-        ["toml", "json", "yaml", "yml"],
-      )
-    ]
+    print_error(
+      "No config file found. Tried the following paths:\n"
+      + "\n".join(f"\t- [underline]{p}[/]" for p in paths),
+    )
+    exit(1)
 
-    path = next((p for p in paths if p.is_file()), None)
+  return path
 
-    if path is None:
-      print_error(
-        "No config file found. Tried the following paths:\n"
-        + "\n".join(f"\t- [underline]{p}[/]" for p in paths),
-      )
-      exit(1)
 
+def get_config(path: Path):
   try:
     return SyncConfig.parse_file(path)
   except msgspec.DecodeError as e:
@@ -80,9 +107,41 @@ def get_config(path: Path | None):
 
 
 @app.command
-def config(path: Path | None = None):
-  config = get_config(path)
-  console.print_json(msgspec.json.encode(config).decode())
+def config():
+  "Parse symsync config, print in json format and exit"
+
+  config_path = get_config_path()
+  sync_config = get_config(config_path)
+  console.print_json(msgspec.json.encode(sync_config).decode())
+
+
+@app.command
+def plan():
+  "Print the sync plan."
+
+  config_path = get_config_path()
+  sync_config = get_config(config_path)
+
+  plan_items = list(StateItem.generate(config_path.parent, sync_config))
+  plan_hashes = {item.state_file_hash: item for item in plan_items}
+  console.print_json(msgspec.json.encode(plan_items).decode())
+
+  state_dir = config_path.parent / ".symsync.state"
+  state_file = state_dir / "state.json"
+  state_store = state_dir / "store"
+
+  if not state_dir.exists():
+    state_store.mkdir(parents=True)
+    state_file.touch()
+
+  if state_dir.is_dir() and state_file.is_file() and state_store.is_dir():
+    # State directory does exist, use it
+    ...
+  else:
+    print_error(
+      f"State directory {state_dir} must not exist or must exist and follow the expected structure"
+    )
+    exit(1)
 
 
 if __name__ == "__main__":
