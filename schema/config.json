@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SyncConfig",
+  "description": "Top-level symsync configuration.",
+  "type": "object",
+  "properties": {
+    "entries": {
+      "description": "A sequence of sync entries.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SyncEntry"
+      }
+    }
+  },
+  "required": [
+    "entries"
+  ],
+  "$defs": {
+    "SyncEntry": {
+      "description": "Configuration for a single sync operation.",
+      "type": "object",
+      "properties": {
+        "groups": {
+          "description": "A set of group names this sync entry belongs to.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "sources": {
+          "description": "Globs used to find source files for the sync.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "target": {
+          "description": "Target directory for the sync.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sources",
+        "target"
+      ]
+    }
+  }
+}
