@@ -16,3 +16,6 @@ serde_yaml = "0.9.34"
 sha1 = "0.10"
 symlink = "0.1.0"
 toml = "1.1.2"
+
+[dev-dependencies]
+tempfile = "3"
