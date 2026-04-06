@@ -163,6 +163,19 @@ fn cmd_sync() -> Result<()> {
                 step.execute()?;
                 println!("{}", step.message());
             }
+            // Notify the user if the parent directory is now empty.
+            if let Some(parent) = target_path.parent() {
+                if parent.is_dir()
+                    && std::fs::read_dir(parent)
+                        .map(|mut d| d.next().is_none())
+                        .unwrap_or(false)
+                {
+                    println!(
+                        "note: {} is now empty, you may want to remove it",
+                        parent.display()
+                    );
+                }
+            }
         }
     }
 
@@ -285,7 +298,7 @@ fn cmd_plan() -> Result<()> {
     let state_dir_for_plan = state_dir_opt.unwrap_or_else(|| root_dir.join(".symsync.state"));
     for state_item in &state_items {
         for step in plan_link(state_item, &state_dir_for_plan) {
-            println!("link    {}", step.message());
+            println!("{}", step.message());
         }
     }
 
