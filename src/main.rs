@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 
 use config::SymsyncConfig;
-use plan::{StateItem, plan_link};
+use plan::{StateItem, plan_link, plan_unlink};
 
 /// A symlink farm manager.
 #[derive(Parser, Debug)]
@@ -123,6 +123,8 @@ fn ensure_state_dir(config_path: &Path) -> Result<PathBuf> {
 /// [`ErrorStep`] representing a conflict, or because an IO operation fails —
 /// execution stops immediately and the error is returned.
 ///
+/// Stale targets — entries present in `targets.toml` that no longer appear in
+/// the config — are unlinked first, then the current set of links is created.
 /// On success, [`targets.toml`] is updated to reflect the current set of
 /// managed targets.
 ///
@@ -133,9 +135,38 @@ fn cmd_sync() -> Result<()> {
     let sync_config = SymsyncConfig::parse_file(&config_path)?;
     let root_dir = config_path.parent().unwrap_or(Path::new("."));
 
-    let state_items = StateItem::generate(root_dir, &sync_config);
+    let state_items = StateItem::generate(root_dir, &sync_config)?;
     let state_dir = ensure_state_dir(&config_path)?;
 
+    // --- Unlink stale targets ---
+    let old_targets = get_targets(&state_dir);
+    let new_target_paths: std::collections::HashSet<String> = state_items
+        .iter()
+        .map(|item| {
+            PathBuf::from(&item.target)
+                .join(&item.link)
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    let active_hashes: std::collections::HashSet<&str> = state_items
+        .iter()
+        .map(|item| item.state_hash.as_str())
+        .collect();
+
+    for (target_path_str, state_hash) in &old_targets {
+        if !new_target_paths.contains(target_path_str) {
+            let target_path = PathBuf::from(target_path_str);
+            // Only remove the state link when no active target shares this hash.
+            let hash_still_needed = active_hashes.contains(state_hash.as_str());
+            for step in plan_unlink(&target_path, state_hash, &state_dir, hash_still_needed) {
+                step.execute()?;
+                println!("{}", step.message());
+            }
+        }
+    }
+
+    // --- Link current targets ---
     for state_item in &state_items {
         for step in plan_link(state_item, &state_dir) {
             step.execute()?;
@@ -146,6 +177,16 @@ fn cmd_sync() -> Result<()> {
     write_targets_file(&state_dir, &state_items).context("Failed to update targets.toml")?;
 
     Ok(())
+}
+
+/// Read `targets.toml` from `state_dir` and return its contents as a map from
+/// target path to state hash. Returns an empty map if the file is missing or
+/// unreadable, or if parsing fails.
+fn get_targets(state_dir: &Path) -> BTreeMap<String, String> {
+    std::fs::read_to_string(state_dir.join("targets.toml"))
+        .ok()
+        .and_then(|content| toml::from_str(&content).ok())
+        .unwrap_or_default()
 }
 
 /// Write `targets.toml` inside `state_dir` with the current set of managed targets.
@@ -188,16 +229,65 @@ fn cmd_config_gen_schema() -> Result<()> {
     Ok(())
 }
 
-/// Generate state items, print them as pretty JSON, and ensure the state directory exists.
+/// Show the full plan: unlink steps for stale targets followed by link steps for
+/// current targets. Each step is printed as a single human-readable line.
+///
+/// If no `targets.toml` exists yet (first run), the unlink phase is skipped.
 fn cmd_plan() -> Result<()> {
     let config_path = get_config_path()?;
     let sync_config = SymsyncConfig::parse_file(&config_path)?;
-    let root_dir = config_path.parent().unwrap_or(Path::new("."));
+    let root_dir = config_path
+        .parent()
+        .with_context(|| "Failed to get config directory")?;
 
-    let state_items = StateItem::generate(root_dir, &sync_config);
-    println!("{}", serde_json::to_string_pretty(&state_items)?);
+    let state_items = StateItem::generate(root_dir, &sync_config)?;
 
-    ensure_state_dir(&config_path)?;
+    // Try to locate the state directory so we can read old targets. It is fine
+    // if it does not exist yet — that just means there is nothing to unlink.
+    let state_dir_opt = {
+        let candidate = root_dir.join(".symsync.state");
+        if candidate.is_dir() {
+            Some(candidate)
+        } else {
+            None
+        }
+    };
+
+    // --- Plan: unlink stale targets ---
+    if let Some(ref state_dir) = state_dir_opt {
+        let old_targets = get_targets(state_dir);
+        let new_target_paths: std::collections::HashSet<String> = state_items
+            .iter()
+            .map(|item| {
+                PathBuf::from(&item.target)
+                    .join(&item.link)
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        let active_hashes: std::collections::HashSet<&str> = state_items
+            .iter()
+            .map(|item| item.state_hash.as_str())
+            .collect();
+
+        for (target_path_str, state_hash) in &old_targets {
+            if !new_target_paths.contains(target_path_str) {
+                let target_path = PathBuf::from(target_path_str);
+                let hash_still_needed = active_hashes.contains(state_hash.as_str());
+                for step in plan_unlink(&target_path, state_hash, state_dir, hash_still_needed) {
+                    println!("unlink  {}", step.message());
+                }
+            }
+        }
+    }
+
+    // --- Plan: link current targets ---
+    let state_dir_for_plan = state_dir_opt.unwrap_or_else(|| root_dir.join(".symsync.state"));
+    for state_item in &state_items {
+        for step in plan_link(state_item, &state_dir_for_plan) {
+            println!("link    {}", step.message());
+        }
+    }
 
     Ok(())
 }

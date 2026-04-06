@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 
@@ -20,8 +20,7 @@ pub struct StateItem {
     pub link: String,
     /// SHA-1 of `link`, used as the unique stem inside the state directory.
     pub state_hash: String,
-    /// Whether the user-visible link should point to the state link via an
-    /// absolute path or a relative path.
+    /// Whether the user-visible link should point to the state link via an absolute path or a relative path.
     pub target_link_type: TargetLinkType,
     /// Group names this item belongs to.
     #[serde(default)]
@@ -30,7 +29,7 @@ pub struct StateItem {
 
 impl StateItem {
     /// Generate state items by expanding all glob sources in `config`, rooted at `root_dir`.
-    pub fn generate(root_dir: &Path, config: &SymsyncConfig) -> Vec<Self> {
+    pub fn generate(root_dir: &Path, config: &SymsyncConfig) -> Result<Vec<Self>> {
         let mut items = Vec::new();
 
         for entry in &config.entries {
@@ -46,31 +45,22 @@ impl StateItem {
             for source_glob in &entry.sources {
                 let pattern = root_dir.join(source_glob).to_string_lossy().to_string();
 
-                let paths = match glob::glob(&pattern) {
-                    Ok(paths) => paths,
-                    Err(_) => continue,
-                };
+                let paths = glob::glob(&pattern)
+                    .with_context(|| format!("glob pattern is invalid {}", &pattern))?;
 
                 for path in paths.flatten() {
+                    // TODO: may need to handle non-file paths
                     if !path.is_file() {
                         continue;
                     }
 
-                    let Ok(rel) = path.strip_prefix(root_dir) else {
-                        continue;
-                    };
-
-                    let rel_str = rel.to_string_lossy().to_string();
-
-                    let mut hasher = Sha1::new();
-                    hasher.update(rel_str.as_bytes());
-                    let state_hash = format!("{:x}", hasher.finalize());
+                    let rel_str = path.strip_prefix(root_dir)?.to_string_lossy().to_string();
 
                     items.push(StateItem {
                         link_path: target.to_string_lossy().to_string(),
                         target: entry.target.clone(),
+                        state_hash: format!("{:x}", Sha1::digest(rel_str.as_bytes())),
                         link: rel_str,
-                        state_hash,
                         target_link_type: entry.target_link_type.clone(),
                         groups: entry.groups.clone(),
                     });
@@ -78,7 +68,7 @@ impl StateItem {
             }
         }
 
-        items
+        Ok(items)
     }
 }
 
@@ -114,6 +104,12 @@ pub struct SymlinkStep {
 
 /// A step that creates a directory (and all parents) at `path`.
 pub struct MkdirStep {
+    pub message: String,
+    pub path: PathBuf,
+}
+
+/// A step that relinks a symlink or removes a directory.
+pub struct UnlinkStep {
     pub message: String,
     pub path: PathBuf,
 }
@@ -160,6 +156,94 @@ impl PlanStep for MkdirStep {
         std::fs::create_dir_all(&self.path)?;
         Ok(())
     }
+}
+
+impl PlanStep for UnlinkStep {
+    fn message(&self) -> &str {
+        &self.message
+    }
+
+    fn execute(&self) -> Result<()> {
+        if self.path.is_dir() {
+            std::fs::remove_dir(&self.path)?;
+        } else {
+            std::fs::remove_file(&self.path)?;
+        }
+        Ok(())
+    }
+}
+
+// ─── plan_unlink ──────────────────────────────────────────────────────────────
+
+/// Build a plan for removing a stale target that is no longer present in the config.
+///
+/// Two things may need to be cleaned up:
+///
+/// 1. The user-visible symlink at `target_path`.
+/// 2. The state link at `state_dir/sources/<state_hash>` — but only when
+///    `hash_still_needed` is `false`, i.e. no remaining config entry maps to
+///    the same hash.
+pub fn plan_unlink(
+    target_path: &Path,
+    state_hash: &str,
+    state_dir: &Path,
+    hash_still_needed: bool,
+) -> Vec<Box<dyn PlanStep>> {
+    let mut steps: Vec<Box<dyn PlanStep>> = Vec::new();
+
+    // Ensure state_dir is absolute so all derived paths are unambiguous.
+    let state_dir = if state_dir.is_absolute() {
+        state_dir.to_path_buf()
+    } else {
+        std::env::current_dir().unwrap_or_default().join(state_dir)
+    };
+
+    // --- Step 1: remove the user-visible symlink ---
+    if target_path.is_symlink() {
+        steps.push(Box::new(UnlinkStep {
+            message: format!("Removed stale link {}", target_path.display()),
+            path: target_path.to_path_buf(),
+        }));
+    } else if target_path.exists() {
+        steps.push(Box::new(ErrorStep {
+            message: format!(
+                "{} exists but is not a symlink — skipping unlink",
+                target_path.display()
+            ),
+        }));
+    } else {
+        steps.push(Box::new(NoOp {
+            message: format!(
+                "{} does not exist, nothing to unlink",
+                target_path.display()
+            ),
+        }));
+    }
+
+    // --- Step 2: remove the orphaned state link (only when no active target needs it) ---
+    if !hash_still_needed {
+        let source_path = state_dir.join("sources").join(state_hash);
+
+        if source_path.is_symlink() {
+            steps.push(Box::new(UnlinkStep {
+                message: format!("Removed orphaned state link {}", source_path.display()),
+                path: source_path,
+            }));
+        } else if source_path.exists() {
+            steps.push(Box::new(ErrorStep {
+                message: format!(
+                    "State link {} exists but is not a symlink — skipping",
+                    source_path.display()
+                ),
+            }));
+        } else {
+            steps.push(Box::new(NoOp {
+                message: format!("State link {} does not exist", source_path.display()),
+            }));
+        }
+    }
+
+    steps
 }
 
 // ─── plan_link ────────────────────────────────────────────────────────────────
