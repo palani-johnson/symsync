@@ -4,15 +4,15 @@ Symsymc is a simple modern symlink farm manager and alternative to [GNU Stow](ht
 
 ## Stateful
 
-Symsync does not simply link from the target path to the source. Instead, it creates a `.symsync.state` directory in the same directory as the config file. Targets point via absolute path to symlinks in the state directory which then point via relative path to the source. Links in the state directory are named via the sha1 hash of the absolute path of the target. This doubly linked structure helps ensure that links managed by symsync are traceable. If you see a symlink that points to a file that lives in a `.symsync.state` directory, you know it is managed by symsync. Additionally, there also exists an additional link in the state directory that points to the target. Here's a more detailed breakdown of the system:
+Symsync does not simply link from the target path to the source. Instead, it creates a `.symsync.state` directory in the same directory as the config file. Targets point via absolute path to symlinks in the state directory which then point via relative path to the source. Links in the state directory are named via the sha1 hash of the relative path source. This doubly linked structure helps ensure that links managed by symsync are traceable. If you see a symlink that points to a file that lives in a `.symsync.state/sources` directory, you know it is managed by symsync. Additionally, a file called `targets.toml` is created which helps track target state . Here's a more detailed breakdown of the system:
 
-| Name         | Path                                                  | Links to                  |
-| ------------ | ----------------------------------------------------- | ------------------------- |
-| Source       | relative to the directory where `symsync.toml` exists |                           |
-| Target       | anywhare on the system                                | full path to State.Source |
-| State.Source | `.symsync.state/{target_path_sha1}.source`            | relative path to Source   |
-| State.Target | `.symsync.state/{target_path_sha1}.target`            | full path to Target       |
+| Name      | Path                                                  | Links to                |
+| --------- | ----------------------------------------------------- | ----------------------- |
+| Source    | relative to the directory where `symsync.toml` exists |                         |
+| Target    | anywhere on the system                                | full path to StateLink  |
+| StateLink | `.symsync.state/sources/{source_path_sha1}`           | relative path to Source |
+| StateFile | `.symsync.state/targets.toml`                         |                         |
 
 ## Configuration
 
-The configuration file `symsync.{toml,json,jsonc,json5,yaml,yml}` must live in the same directory that you plan to have the state directory live in. A json schema spec for the file can be found [here]() or generated via the `symsync config gen-schema` command. Example configurations can be found in this repo's `example/` folder.
+The configuration file `symsync.{toml,json,jsonc,json5,yaml,yml}` must live in the same directory that you plan to have the state directory live in. A json schema spec for the file can be found [here](schema/config.json) or generated via the `symsync gen-config-schema` command. Example configurations can be found in this repo's `example/` folder.
