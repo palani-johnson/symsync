@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "SyncConfig",
-  "description": "Top-level symsync configuration.",
+  "title": "SymsyncConfig",
+  "description": "Configuration for symsync",
   "type": "object",
   "properties": {
     "entries": {
@@ -39,11 +39,31 @@
         "target": {
           "description": "Target directory for the sync.",
           "type": "string"
+        },
+        "target_link_type": {
+          "description": "Whether the user-visible link should point to the state link via an absolute path or a relative path.",
+          "$ref": "#/$defs/TargetLinkType"
         }
       },
       "required": [
         "sources",
-        "target"
+        "target",
+        "target_link_type"
+      ]
+    },
+    "TargetLinkType": {
+      "description": "Whether the user-visible link points to the state link via an absolute or relative path.",
+      "oneOf": [
+        {
+          "description": "The link points to the state link using its full absolute path.",
+          "type": "string",
+          "const": "absolute"
+        },
+        {
+          "description": "The link points to the state link using a path relative to the link's own parent directory.",
+          "type": "string",
+          "const": "relative"
+        }
       ]
     }
   }
