@@ -142,7 +142,28 @@ impl PlanStep for SymlinkStep {
     }
 
     fn execute(&self) -> Result<()> {
+        if self.symlink_path.is_symlink() {
+            if std::fs::read_link(&self.symlink_path).ok().as_deref()
+                == Some(self.target_path.as_path())
+            {
+                return Ok(());
+            }
+
+            bail!(
+                "{} already exists as a symlink pointing to a different target",
+                self.symlink_path.display()
+            );
+        }
+
+        if self.symlink_path.exists() {
+            bail!(
+                "{} already exists and is not a symlink",
+                self.symlink_path.display()
+            );
+        }
+
         symlink::symlink_file(&self.target_path, &self.symlink_path)?;
+
         Ok(())
     }
 }
@@ -164,6 +185,9 @@ impl PlanStep for UnlinkStep {
     }
 
     fn execute(&self) -> Result<()> {
+        if !self.path.exists() && !self.path.is_symlink() {
+            return Ok(());
+        }
         if self.path.is_dir() {
             std::fs::remove_dir(&self.path)?;
         } else {
