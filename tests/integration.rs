@@ -29,7 +29,7 @@ fn symsync_cmd_output<S: AsRef<std::ffi::OsStr>, I: IntoIterator<Item = S>>(
 
 #[test]
 fn verify_help_output() -> anyhow::Result<()> {
-    let output = symsync_cmd_output(&["--help"], None)?;
+    let output = symsync_cmd_output(&["help"], None)?;
 
     anyhow::ensure!(
         output.starts_with("A symlink farm manager\n\nUsage: symsync"),
@@ -39,29 +39,35 @@ fn verify_help_output() -> anyhow::Result<()> {
     Ok(())
 }
 
+const EXPECTED_UNSYNCED_PLAN: &str = "Symsync plan:
+
+mkdir  ./out/
+link   ./out/file_0.txt as ../.symsync.state/sources/064525aa0ae4a2240df5e54f08c3004cbe29cba1
+link   ./out/file_1.txt as ../.symsync.state/sources/bb862d7ccad0c082b3db9f05b57d5f0384eb9471
+link   ./out/file_2.txt as ../.symsync.state/sources/2b562f4c942af3f299539c934e5d23914c1cd43f
+mkdir  ./.symsync.state/sources/
+link   ./.symsync.state/sources/064525aa0ae4a2240df5e54f08c3004cbe29cba1 as ../../file_0.txt
+link   ./.symsync.state/sources/bb862d7ccad0c082b3db9f05b57d5f0384eb9471 as ../../file_1.txt
+link   ./.symsync.state/sources/2b562f4c942af3f299539c934e5d23914c1cd43f as ../../file_2.txt
+write  ./.symsync.state/targets.toml";
+
+fn expected_unsynched_plan_output() -> String {
+    EXPECTED_UNSYNCED_PLAN.replace("/", std::path::MAIN_SEPARATOR_STR)
+}
+
 #[test]
 fn verify_plan_from_unsynced() -> anyhow::Result<()> {
     let root_dir = basic_unsynced_dir()?;
     let output = symsync_cmd_output(&["plan"], Some(root_dir.path()))?;
 
     // Verify expected output
-
-    let expected_steps = vec![
-        "Symsync plan:",
-        "",
-        "mkdir  ./out/",
-        "link   ./out/file_0.txt as ../.symsync.state/sources/064525aa0ae4a2240df5e54f08c3004cbe29cba1",
-        "link   ./out/file_1.txt as ../.symsync.state/sources/bb862d7ccad0c082b3db9f05b57d5f0384eb9471",
-        "link   ./out/file_2.txt as ../.symsync.state/sources/2b562f4c942af3f299539c934e5d23914c1cd43f",
-        "mkdir  ./.symsync.state/sources/",
-        "link   ./.symsync.state/sources/064525aa0ae4a2240df5e54f08c3004cbe29cba1 as ../../file_0.txt",
-        "link   ./.symsync.state/sources/bb862d7ccad0c082b3db9f05b57d5f0384eb9471 as ../../file_1.txt",
-        "link   ./.symsync.state/sources/2b562f4c942af3f299539c934e5d23914c1cd43f as ../../file_2.txt",
-        "write  ./.symsync.state/targets.toml",
-    ];
-    let lines: Vec<_> = output.lines().collect();
-
-    for (index, (expected, actual)) in expected_steps.iter().zip(lines.iter()).enumerate() {
+    for (index, (expected, actual)) in expected_unsynched_plan_output()
+        .lines()
+        .into_iter()
+        .map(|s| s.replace("/", std::path::MAIN_SEPARATOR_STR))
+        .zip(output.lines().into_iter())
+        .enumerate()
+    {
         anyhow::ensure!(
             expected == actual,
             "plan step {} does not match expected steps at index: '{}' != '{}'",
@@ -80,23 +86,12 @@ fn verify_sync_output_from_unsynced() -> anyhow::Result<()> {
     let output = symsync_cmd_output(&["sync"], Some(root_dir.path()))?;
 
     // Verify expected output
-
-    let expected_steps = vec![
-        "Symsync plan:",
-        "",
-        "mkdir  ./out/",
-        "link   ./out/file_0.txt as ../.symsync.state/sources/064525aa0ae4a2240df5e54f08c3004cbe29cba1",
-        "link   ./out/file_1.txt as ../.symsync.state/sources/bb862d7ccad0c082b3db9f05b57d5f0384eb9471",
-        "link   ./out/file_2.txt as ../.symsync.state/sources/2b562f4c942af3f299539c934e5d23914c1cd43f",
-        "mkdir  ./.symsync.state/sources/",
-        "link   ./.symsync.state/sources/064525aa0ae4a2240df5e54f08c3004cbe29cba1 as ../../file_0.txt",
-        "link   ./.symsync.state/sources/bb862d7ccad0c082b3db9f05b57d5f0384eb9471 as ../../file_1.txt",
-        "link   ./.symsync.state/sources/2b562f4c942af3f299539c934e5d23914c1cd43f as ../../file_2.txt",
-        "write  ./.symsync.state/targets.toml",
-    ];
-    let lines: Vec<_> = output.lines().collect();
-
-    for (index, (expected, actual)) in expected_steps.iter().zip(lines.iter()).enumerate() {
+    for (index, (expected, actual)) in expected_unsynched_plan_output()
+        .lines()
+        .into_iter()
+        .zip(output.lines().into_iter())
+        .enumerate()
+    {
         anyhow::ensure!(
             expected == actual,
             "plan step {} does not match expected steps at index: '{}' != '{}'",
