@@ -18,5 +18,5 @@ symlink = "0.1.0"
 toml = "1.1.2"
 
 [dev-dependencies]
-rstest = "0.26.1"
+assert_cmd = "2.2.0"
 tempfile = "3"
