@@ -77,7 +77,11 @@ impl StateItem {
 /// A single step in a sync plan.
 pub trait PlanStep {
     /// A human-readable description of what this step will do.
-    fn message(&self) -> &str;
+    /// Returns `None` for silent steps (no-ops and internal operations).
+    fn message(&self) -> Option<&str>;
+
+    /// Returns `true` if this step is a no-op and will not change any state.
+    fn is_noop(&self) -> bool;
 
     /// Execute this step.
     fn execute(&self) -> Result<()>;
@@ -86,9 +90,7 @@ pub trait PlanStep {
 // ─── Concrete step types ──────────────────────────────────────────────────────
 
 /// A step that does nothing — the desired state already exists.
-pub struct NoOp {
-    pub message: String,
-}
+pub struct NoOp;
 
 /// A step that represents an unresolvable conflict and blocks execution.
 pub struct ErrorStep {
@@ -96,6 +98,7 @@ pub struct ErrorStep {
 }
 
 /// A step that creates a symlink at `symlink_path` pointing to `target_path`.
+/// An empty `message` marks the step as silent (used for internal state links).
 pub struct SymlinkStep {
     pub message: String,
     pub symlink_path: PathBuf,
@@ -108,7 +111,8 @@ pub struct MkdirStep {
     pub path: PathBuf,
 }
 
-/// A step that relinks a symlink or removes a directory.
+/// A step that removes a symlink or empty directory at `path`.
+/// An empty `message` marks the step as silent (used for internal state links).
 pub struct UnlinkStep {
     pub message: String,
     pub path: PathBuf,
@@ -117,8 +121,12 @@ pub struct UnlinkStep {
 // ─── PlanStep implementations ─────────────────────────────────────────────────
 
 impl PlanStep for NoOp {
-    fn message(&self) -> &str {
-        &self.message
+    fn message(&self) -> Option<&str> {
+        None
+    }
+
+    fn is_noop(&self) -> bool {
+        true
     }
 
     fn execute(&self) -> Result<()> {
@@ -127,8 +135,12 @@ impl PlanStep for NoOp {
 }
 
 impl PlanStep for ErrorStep {
-    fn message(&self) -> &str {
-        &self.message
+    fn message(&self) -> Option<&str> {
+        Some(&self.message)
+    }
+
+    fn is_noop(&self) -> bool {
+        false
     }
 
     fn execute(&self) -> Result<()> {
@@ -137,8 +149,16 @@ impl PlanStep for ErrorStep {
 }
 
 impl PlanStep for SymlinkStep {
-    fn message(&self) -> &str {
-        &self.message
+    fn message(&self) -> Option<&str> {
+        if self.message.is_empty() {
+            None
+        } else {
+            Some(&self.message)
+        }
+    }
+
+    fn is_noop(&self) -> bool {
+        false
     }
 
     fn execute(&self) -> Result<()> {
@@ -148,29 +168,33 @@ impl PlanStep for SymlinkStep {
             {
                 return Ok(());
             }
-
             bail!(
                 "{} already exists as a symlink pointing to a different target",
                 self.symlink_path.display()
             );
         }
-
         if self.symlink_path.exists() {
             bail!(
                 "{} already exists and is not a symlink",
                 self.symlink_path.display()
             );
         }
-
         symlink::symlink_file(&self.target_path, &self.symlink_path)?;
-
         Ok(())
     }
 }
 
 impl PlanStep for MkdirStep {
-    fn message(&self) -> &str {
-        &self.message
+    fn message(&self) -> Option<&str> {
+        if self.message.is_empty() {
+            None
+        } else {
+            Some(&self.message)
+        }
+    }
+
+    fn is_noop(&self) -> bool {
+        false
     }
 
     fn execute(&self) -> Result<()> {
@@ -180,8 +204,16 @@ impl PlanStep for MkdirStep {
 }
 
 impl PlanStep for UnlinkStep {
-    fn message(&self) -> &str {
-        &self.message
+    fn message(&self) -> Option<&str> {
+        if self.message.is_empty() {
+            None
+        } else {
+            Some(&self.message)
+        }
+    }
+
+    fn is_noop(&self) -> bool {
+        false
     }
 
     fn execute(&self) -> Result<()> {
@@ -207,6 +239,8 @@ impl PlanStep for UnlinkStep {
 /// 2. The state link at `state_dir/sources/<state_hash>` — but only when
 ///    `hash_still_needed` is `false`, i.e. no remaining config entry maps to
 ///    the same hash.
+///
+/// State-link cleanup steps are silent; only the user-visible unlink is reported.
 pub fn plan_unlink(
     target_path: &Path,
     state_hash: &str,
@@ -225,45 +259,38 @@ pub fn plan_unlink(
     // --- Step 1: remove the user-visible symlink ---
     if target_path.is_symlink() {
         steps.push(Box::new(UnlinkStep {
-            message: format!("Removed stale link {}", target_path.display()),
+            message: format!("unlink {}", target_path.display()),
             path: target_path.to_path_buf(),
         }));
     } else if target_path.exists() {
         steps.push(Box::new(ErrorStep {
             message: format!(
-                "{} exists but is not a symlink — skipping unlink",
+                "conflict: {} exists but is not a symlink",
                 target_path.display()
             ),
         }));
     } else {
-        steps.push(Box::new(NoOp {
-            message: format!(
-                "{} does not exist, nothing to unlink",
-                target_path.display()
-            ),
-        }));
+        steps.push(Box::new(NoOp));
     }
 
-    // --- Step 2: remove the orphaned state link (only when no active target needs it) ---
+    // --- Step 2: remove the orphaned state link (silent, internal) ---
     if !hash_still_needed {
         let source_path = state_dir.join("sources").join(state_hash);
 
         if source_path.is_symlink() {
             steps.push(Box::new(UnlinkStep {
-                message: format!("Removed orphaned state link {}", source_path.display()),
+                message: String::new(), // internal — silent
                 path: source_path,
             }));
         } else if source_path.exists() {
             steps.push(Box::new(ErrorStep {
                 message: format!(
-                    "State link {} exists but is not a symlink — skipping",
+                    "conflict: state link {} exists but is not a symlink",
                     source_path.display()
                 ),
             }));
         } else {
-            steps.push(Box::new(NoOp {
-                message: format!("State link {} does not exist", source_path.display()),
-            }));
+            steps.push(Box::new(NoOp));
         }
     }
 
@@ -278,8 +305,8 @@ pub fn plan_unlink(
 ///
 ///   `link_path/link`  →  `state_dir/sources/<hash>`  →  `../../true_path`
 ///
-/// Target symlinks point via absolute path into `.symsync.state/sources/`, making
-/// every symsync-managed symlink identifiable by its destination directory.
+/// State-link steps are silent (internal plumbing); only the user-visible mkdir
+/// and symlink steps are reported.
 pub fn plan_link(state_item: &StateItem, state_dir: &Path) -> Vec<Box<dyn PlanStep>> {
     let mut steps: Vec<Box<dyn PlanStep>> = Vec::new();
 
@@ -309,40 +336,35 @@ pub fn plan_link(state_item: &StateItem, state_dir: &Path) -> Vec<Box<dyn PlanSt
     // The state link for this item: .symsync.state/sources/<sha1>
     let source_path = sources_dir.join(&state_item.state_hash);
 
-    // Relative path from `sources_dir` (the directory containing the state link)
-    // to the real source file. The OS resolves relative symlink targets from the
-    // directory containing the symlink, so `sources_dir` is the correct base.
+    // Relative path from `sources_dir` to the real source file.
     let source_to_true =
         pathdiff::diff_paths(&true_path, &sources_dir).unwrap_or_else(|| true_path.clone());
 
-    // --- Step 1: sources/<hash> → true_path (relative) ---
+    // --- Step 1: sources/<hash> → true_path (silent, internal) ---
     if source_path.is_symlink() {
         match std::fs::read_link(&source_path) {
             Ok(existing) if existing == source_to_true => {
-                steps.push(Box::new(NoOp {
-                    message: format!(
-                        "{} already points to {}",
-                        source_path.display(),
-                        source_to_true.display()
-                    ),
-                }));
+                steps.push(Box::new(NoOp));
             }
             _ => {
                 steps.push(Box::new(ErrorStep {
                     message: format!(
-                        "{} exists but points to an invalid location",
-                        source_path.display()
+                        "conflict: state link for {} points to wrong target",
+                        state_item.link
                     ),
                 }));
             }
         }
     } else if source_path.exists() {
         steps.push(Box::new(ErrorStep {
-            message: format!("{} exists but is not a symlink", source_path.display()),
+            message: format!(
+                "conflict: state link {} exists but is not a symlink",
+                source_path.display()
+            ),
         }));
     } else {
         steps.push(Box::new(SymlinkStep {
-            message: format!("{} → {}", source_path.display(), source_to_true.display()),
+            message: String::new(), // internal — silent
             symlink_path: source_path.clone(),
             target_path: source_to_true,
         }));
@@ -353,23 +375,18 @@ pub fn plan_link(state_item: &StateItem, state_dir: &Path) -> Vec<Box<dyn PlanSt
         if !parent.as_os_str().is_empty() {
             if parent.exists() {
                 if parent.is_dir() {
-                    steps.push(Box::new(NoOp {
-                        message: format!(
-                            "Link parent directory {} already exists",
-                            parent.display()
-                        ),
-                    }));
+                    steps.push(Box::new(NoOp));
                 } else {
                     steps.push(Box::new(ErrorStep {
                         message: format!(
-                            "Link parent directory {} exists but is not a directory",
+                            "conflict: {} exists but is not a directory",
                             parent.display()
                         ),
                     }));
                 }
             } else {
                 steps.push(Box::new(MkdirStep {
-                    message: format!("Link parent directory {} created", parent.display()),
+                    message: format!("mkdir  {}", parent.display()),
                     path: parent.to_path_buf(),
                 }));
             }
@@ -377,11 +394,6 @@ pub fn plan_link(state_item: &StateItem, state_dir: &Path) -> Vec<Box<dyn PlanSt
     }
 
     // --- Step 3: link_path → sources/<hash> (absolute or relative) ---
-
-    // Compute the path the user-visible link should point to. For absolute
-    // links this is the full path to the state link. For relative links it is
-    // the path from the link's parent directory to the state link, which is
-    // what the OS uses when resolving the symlink.
     let link_target = match state_item.target_link_type {
         TargetLinkType::Absolute => source_path.clone(),
         TargetLinkType::Relative => {
@@ -393,18 +405,12 @@ pub fn plan_link(state_item: &StateItem, state_dir: &Path) -> Vec<Box<dyn PlanSt
     if link_path.is_symlink() {
         match std::fs::read_link(&link_path) {
             Ok(existing) if existing == link_target => {
-                steps.push(Box::new(NoOp {
-                    message: format!(
-                        "{} already points to {}",
-                        link_path.display(),
-                        link_target.display()
-                    ),
-                }));
+                steps.push(Box::new(NoOp));
             }
             _ => {
                 steps.push(Box::new(ErrorStep {
                     message: format!(
-                        "{} exists but points to an invalid location",
+                        "conflict: {} already exists pointing to a different target",
                         link_path.display()
                     ),
                 }));
@@ -412,11 +418,14 @@ pub fn plan_link(state_item: &StateItem, state_dir: &Path) -> Vec<Box<dyn PlanSt
         }
     } else if link_path.exists() {
         steps.push(Box::new(ErrorStep {
-            message: format!("{} exists but is not a symlink", link_path.display()),
+            message: format!(
+                "conflict: {} exists but is not a symlink",
+                link_path.display()
+            ),
         }));
     } else {
         steps.push(Box::new(SymlinkStep {
-            message: format!("{} → {}", link_path.display(), link_target.display()),
+            message: format!("link   {}", link_path.display()),
             symlink_path: link_path,
             target_path: link_target,
         }));

@@ -154,6 +154,9 @@ fn cmd_sync() -> Result<()> {
         .map(|item| item.state_hash.as_str())
         .collect();
 
+    let mut did_anything = false;
+    let mut printed = false;
+
     for (target_path_str, state_hash) in &old_targets {
         if !new_target_paths.contains(target_path_str) {
             let target_path = PathBuf::from(target_path_str);
@@ -161,7 +164,13 @@ fn cmd_sync() -> Result<()> {
             let hash_still_needed = active_hashes.contains(state_hash.as_str());
             for step in plan_unlink(&target_path, state_hash, &state_dir, hash_still_needed) {
                 step.execute()?;
-                println!("{}", step.message());
+                if !step.is_noop() {
+                    did_anything = true;
+                }
+                if let Some(msg) = step.message() {
+                    println!("{msg}");
+                    printed = true;
+                }
             }
             // Notify the user if the parent directory is now empty.
             if let Some(parent) = target_path.parent() {
@@ -183,8 +192,20 @@ fn cmd_sync() -> Result<()> {
     for state_item in &state_items {
         for step in plan_link(state_item, &state_dir) {
             step.execute()?;
-            println!("{}", step.message());
+            if !step.is_noop() {
+                did_anything = true;
+            }
+            if let Some(msg) = step.message() {
+                println!("{msg}");
+                printed = true;
+            }
         }
+    }
+
+    if !did_anything {
+        println!("already in sync");
+    } else if !printed {
+        println!("synced");
     }
 
     write_targets_file(&state_dir, &state_items).context("Failed to update targets.toml")?;
@@ -288,7 +309,9 @@ fn cmd_plan() -> Result<()> {
                 let target_path = PathBuf::from(target_path_str);
                 let hash_still_needed = active_hashes.contains(state_hash.as_str());
                 for step in plan_unlink(&target_path, state_hash, state_dir, hash_still_needed) {
-                    println!("unlink  {}", step.message());
+                    if let Some(msg) = step.message() {
+                        println!("{msg}");
+                    }
                 }
             }
         }
@@ -296,10 +319,18 @@ fn cmd_plan() -> Result<()> {
 
     // --- Plan: link current targets ---
     let state_dir_for_plan = state_dir_opt.unwrap_or_else(|| root_dir.join(".symsync.state"));
+    let mut did_anything = false;
     for state_item in &state_items {
         for step in plan_link(state_item, &state_dir_for_plan) {
-            println!("{}", step.message());
+            if let Some(msg) = step.message() {
+                println!("{msg}");
+                did_anything = true;
+            }
         }
+    }
+
+    if !did_anything {
+        println!("nothing to do");
     }
 
     Ok(())
