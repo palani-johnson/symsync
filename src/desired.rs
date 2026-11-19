@@ -25,7 +25,7 @@ pub fn expand(loaded: &LoadedConfig, home: &Path) -> Result<BTreeMap<String, Tar
             let target_dir = resolve(&group.target, loaded.dir(), home)?;
 
             for source in &group.sources {
-                for path in matches(&root, source)? {
+                for path in matches(&root, source, group.hidden)? {
                     let rel = path.strip_prefix(&root).with_context(|| {
                         format!("{} is outside of root {}", path.display(), root.display())
                     })?;
@@ -53,18 +53,29 @@ pub fn expand(loaded: &LoadedConfig, home: &Path) -> Result<BTreeMap<String, Tar
     Ok(packages)
 }
 
-/// Files that match `pattern` under `root`, normalized.
-fn matches(root: &Path, pattern: &str) -> Result<Vec<PathBuf>> {
+/// Files that match `pattern` under `root`, normalized. Unless `hidden` is set, a name that starts with `.` matches only a literal `.` in the pattern.
+fn matches(root: &Path, pattern: &str, hidden: bool) -> Result<Vec<PathBuf>> {
+    let invalid = || format!("invalid glob {pattern}");
     let full = format!(
         "{}/{pattern}",
         glob::Pattern::escape(&root.to_string_lossy())
     );
-    let paths = glob::glob(&full).with_context(|| format!("invalid glob {pattern}"))?;
+    let paths = glob::glob(&full).with_context(invalid)?;
+
+    // The glob walker drops every hidden entry when `require_literal_leading_dot` is set, even for `.*`, so the rule is applied to each match instead.
+    let relative = glob::Pattern::new(pattern).with_context(invalid)?;
+    let options = glob::MatchOptions {
+        require_literal_leading_dot: !hidden,
+        ..glob::MatchOptions::new()
+    };
 
     let mut files = Vec::new();
     for path in paths {
         let path = path.with_context(|| format!("failed to read a match of {pattern}"))?;
-        if path.is_file() {
+        let visible = path
+            .strip_prefix(root)
+            .is_ok_and(|rel| relative.matches_path_with(rel, options));
+        if visible && path.is_file() {
             files.push(normalize(&path));
         }
     }
@@ -103,6 +114,7 @@ mod tests {
             root: root.map(PathBuf::from),
             sources: sources.iter().map(|s| s.to_string()).collect(),
             target: target.into(),
+            hidden: false,
         }
     }
 
@@ -159,14 +171,43 @@ mod tests {
     }
 
     #[test]
-    fn matches_dotfiles_and_skips_dirs() {
-        let f = fixture(&["zsh/.zshrc", "zsh/dir/file"]);
+    fn skips_dirs() {
+        let f = fixture(&["zsh/zshrc", "zsh/dir/file"]);
         let loaded = config(&f, vec![("zsh", vec![group(Some("zsh"), &["*"], "~")])]);
 
         assert_eq!(
             expand(&loaded, &f.home).unwrap()["zsh"],
-            Targets::from([(f.home.join(".zshrc"), f.repo.join("zsh/.zshrc"))])
+            Targets::from([(f.home.join("zshrc"), f.repo.join("zsh/zshrc"))])
         );
+    }
+
+    #[test]
+    fn wildcards_skip_hidden_files_by_default() {
+        let f = fixture(&["a", ".hidden", ".git/config", "dir/.hidden"]);
+        let loaded = config(&f, vec![("p", vec![group(None, &["**/*"], "out")])]);
+
+        assert_eq!(
+            expand(&loaded, &f.home).unwrap()["p"],
+            Targets::from([(f.repo.join("out/a"), f.repo.join("a"))])
+        );
+    }
+
+    #[test]
+    fn literal_dot_matches_hidden_files() {
+        let f = fixture(&["zsh/.zshrc", "zsh/.zshenv", "zsh/README"]);
+        let loaded = config(&f, vec![("zsh", vec![group(Some("zsh"), &[".zsh*"], "~")])]);
+
+        assert_eq!(expand(&loaded, &f.home).unwrap()["zsh"].len(), 2);
+    }
+
+    #[test]
+    fn hidden_lets_wildcards_match_hidden_files() {
+        let f = fixture(&["a", ".hidden", "dir/.hidden"]);
+        let mut hidden = group(None, &["**/*"], "out");
+        hidden.hidden = true;
+        let loaded = config(&f, vec![("p", vec![hidden])]);
+
+        assert_eq!(expand(&loaded, &f.home).unwrap()["p"].len(), 3);
     }
 
     #[test]

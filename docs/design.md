@@ -146,6 +146,7 @@ Each link group has these fields:
 - `root`: the directory that the source globs are relative to. The default is the config directory.
 - `sources`: globs that select source files.
 - `target`: the target directory. Each match goes to `target` joined with the path of the match relative to `root`. For example, `zed/themes/dark.json` with `root = "zed"` goes to `~/.config/zed/themes/dark.json`.
+- `hidden`: when `true`, wildcards also match names that start with `.`. The default is `false`: wildcards skip hidden files and directories (so `**/*` does not go into `.git/`), and only a literal `.` in a glob matches them, as in `.zshrc`, `.*` or `.config/**/*`.
 
 Globs select only files. Symsync does not link directories. A target always has the same name as its source, relative to `root`. There is no syntax to map one source to a target with a different name.
 

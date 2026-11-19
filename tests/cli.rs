@@ -28,6 +28,7 @@ const ZSH_CONFIG: &str = r#"
 root = "zsh"
 sources = ["*"]
 target = "~"
+hidden = true
 "#;
 
 impl Sandbox {

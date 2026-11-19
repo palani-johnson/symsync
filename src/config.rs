@@ -63,6 +63,10 @@ pub struct LinkGroup {
 
     /// Target directory. Each match goes here, at its path relative to `root`.
     pub target: String,
+
+    /// Let wildcards match names that start with `.`. Without this, only a literal `.` in a glob matches them.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
 }
 
 /// A config together with the absolute path of the file it came from.
