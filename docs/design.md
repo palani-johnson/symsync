@@ -45,7 +45,7 @@ The link type sets how symsync stores every path for a package:
 - `absolute` (default): target links, state links and the paths in `packages.toml` are absolute.
 - `relative`: target links point to state links by relative path, state links point to sources by a path relative to `links/`, and `packages.toml` records paths relative to the state directory.
 
-Relative mode makes a link chain that is fully self-contained when the state directory is inside the repo. You can commit it, and it works after a clone to any location. The examples folder uses this mode.
+Relative mode makes a link chain that is fully self-contained. You can commit it, and it works after a clone to any location. The examples folder uses this mode. A relative chain survives a move only when everything moves together, so in relative mode the state directory and all sources and targets must be inside the config directory. If one is outside, `plan` and `sync` stop with an error.
 
 Symsync finds the link type in this order:
 
@@ -231,6 +231,7 @@ Symsync never adopts a file automatically.
 - **ok:** the full chain from target to source is correct.
 - **missing link:** there is nothing at the target. Sync creates the link again.
 - **drifted:** the target is a regular file (see [Drift](#drift)). Sync reports a conflict.
+- **exists:** the target is a directory or another file that is not a link. Sync reports a conflict.
 - **foreign link:** the target is a link that does not point to its state link. Sync reports a conflict.
 - **missing state link:** the state link does not exist. Sync creates it again.
 - **wrong state link:** the state link does not point to the recorded source. Sync rewrites it.
@@ -239,6 +240,23 @@ Symsync never adopts a file automatically.
 ## Stray state links
 
 A stray state link is an entry in `links/` that no package records, for example after manual changes to the state directory. `status` lists stray state links, and `symsync prune` removes them. Prune removes only symlinks, and leaves other files in place with a note.
+
+## Paths
+
+Symsync canonicalizes the config path and the state directory (it resolves symlinks in the part of the path that exists). Thus a config or state directory has one identity, however you reach it. Targets and sources are only normalized lexically, so that a target keeps the path that you wrote in the config.
+
+## Known limitations
+
+Symsync is a tool to manage dotfiles for one user. These edge cases are known, and they are not likely in normal use, so symsync does not handle them:
+
+- **Relative links under a symlinked parent:** in relative mode, symsync computes link values from the path text. If a target's parent directory is a symlink, the kernel resolves the link from the real directory, and the link can dangle while `status` reports `ok`.
+- **`plan` and `sync` can disagree in rare layouts:** if one link group creates a file at a path that another link group uses as a directory, or if a parent directory of a target is a dangling symlink, `plan` shows no conflict but `sync` fails partway. Because sync records old and new targets before any change, the next sync recovers.
+- **Ownership checks ignore other state directories:** when symsync checks whether another config still defines a package, it does not check that the other config uses the same state directory.
+- **`--package` still expands all packages:** a bad glob or a target collision in another package also stops a filtered run.
+- **Absolute globs:** a glob such as `/etc/hosts` is joined to `root`, so it matches nothing and only gives a warning.
+- **`~` in `adopt`:** the shell expands `~`. A quoted `'~/x'` is not expanded.
+- **Unicode normalization:** state link names hash the bytes of the target path. On macOS, the same name in NFC and NFD form gives two different state links.
+- **`$SYMSYNC_STATE_DIR` overrides the config:** when it is set in your shell, it also replaces `state_dir` in a config, for example in the examples folder.
 
 ## Testing
 

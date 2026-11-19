@@ -21,7 +21,9 @@ The state directory also holds `packages.toml`, the record of which package owns
 
 A package is a named group of links in a repo config, and package names are unique in a state directory. One machine can use packages from many repos, and if two repos define the same package name, sync stops with a conflict.
 
-By default, all links and recorded paths are absolute. With `link_type = "relative"` in the config (or `$SYMSYNC_LINK_TYPE`), they are all relative. Together with a `state_dir` inside the repo, this makes a self-contained chain that you can commit and that works after a clone to any location. The [basic example](examples/basic) uses this mode.
+By default, all links and recorded paths are absolute. With `link_type = "relative"` in the config (or `$SYMSYNC_LINK_TYPE`), they are all relative. Together with a `state_dir` inside the repo, this makes a self-contained chain that you can commit and that works after a clone to any location. In relative mode, the state directory and all targets must be inside the repo. The [basic example](examples/basic) uses this mode.
+
+Symsync is made for dotfiles, and it does not try to handle every edge case. The design document lists the [known limitations](docs/design.md#known-limitations).
 
 ## Configuration
 
