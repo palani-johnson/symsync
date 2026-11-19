@@ -120,6 +120,9 @@ impl Context {
         ));
         let link_type = settings::link_type(&env, Some(&loaded))?;
         let mut expansion = desired::expand(&loaded, &env.home, &state_dir)?;
+        if link_type == LinkType::Relative {
+            desired::check_contained(&expansion.packages, &state_dir, loaded.dir(), &env.home)?;
+        }
 
         let scope =
             (!packages.is_empty()).then(|| packages.iter().cloned().collect::<BTreeSet<String>>());

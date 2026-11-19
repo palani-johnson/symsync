@@ -17,6 +17,32 @@ pub struct Expansion {
     pub warnings: Vec<(String, String)>,
 }
 
+/// Checks that the state directory and all paths of all packages are inside `dir`. A relative chain survives a move only when everything moves together.
+pub fn check_contained(
+    packages: &BTreeMap<String, Targets>,
+    state_dir: &Path,
+    dir: &Path,
+    home: &Path,
+) -> Result<()> {
+    let outside = std::iter::once(state_dir)
+        .chain(
+            packages
+                .values()
+                .flat_map(|targets| targets.iter())
+                .flat_map(|(target, source)| [target.as_path(), source.as_path()]),
+        )
+        .find(|path| !path.starts_with(dir));
+
+    if let Some(path) = outside {
+        bail!(
+            "the relative link type needs the state directory and all targets inside {}, but {} is outside",
+            display(dir, home),
+            display(path, home)
+        );
+    }
+    Ok(())
+}
+
 /// Expands the globs of every package in the config into the targets the package wants. The config file and files that belong to the state directory at `state_dir` are never sources.
 pub fn expand(loaded: &LoadedConfig, home: &Path, state_dir: &Path) -> Result<Expansion> {
     let mut expansion = Expansion::default();
@@ -328,5 +354,18 @@ mod tests {
             "{:?}",
             expansion.warnings
         );
+    }
+
+    #[test]
+    fn contained_paths_pass_and_others_fail() {
+        let f = fixture(&["a.txt"]);
+        let inside = Targets::from([(f.repo.join("out/a.txt"), f.repo.join("a.txt"))]);
+        let packages = BTreeMap::from([("p".to_string(), inside)]);
+        assert!(check_contained(&packages, &f.state, &f.repo, &f.home).is_ok());
+        assert!(check_contained(&packages, &f.home.join("state"), &f.repo, &f.home).is_err());
+
+        let outside = Targets::from([(f.home.join("a.txt"), f.repo.join("a.txt"))]);
+        let packages = BTreeMap::from([("p".to_string(), outside)]);
+        assert!(check_contained(&packages, &f.state, &f.repo, &f.home).is_err());
     }
 }
