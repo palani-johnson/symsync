@@ -1,4 +1,5 @@
 mod config;
+mod paths;
 
 use std::path::PathBuf;
 
