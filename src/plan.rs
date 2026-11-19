@@ -345,6 +345,7 @@ mod tests {
     use std::os::unix::fs::symlink;
 
     use super::*;
+    use crate::execute::{run_steps, update_records};
 
     struct Fixture {
         _tmp: tempfile::TempDir,
@@ -409,23 +410,8 @@ mod tests {
         /// Applies the plan and records its packages, as sync will.
         fn apply(&mut self, plan: Plan) {
             assert!(plan.conflicts.is_empty(), "{:?}", plan.conflicts);
-            for step in plan.steps {
-                match step.action {
-                    Action::CreateDir(dir) => std::fs::create_dir_all(dir).unwrap(),
-                    Action::CreateLink { path, value } => symlink(value, path).unwrap(),
-                    Action::ReplaceLink { path, value } => {
-                        std::fs::remove_file(&path).unwrap();
-                        symlink(value, path).unwrap();
-                    }
-                    Action::RemoveLink(path) => std::fs::remove_file(path).unwrap(),
-                }
-            }
-            for (name, record) in plan.records {
-                match record {
-                    Some(record) => self.state.packages.insert(name, record),
-                    None => self.state.packages.remove(&name),
-                };
-            }
+            run_steps(&plan.steps, |_| {}).unwrap();
+            update_records(&mut self.state, plan.records);
         }
     }
 
