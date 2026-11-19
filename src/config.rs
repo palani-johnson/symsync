@@ -137,7 +137,7 @@ fn parse(content: &str, path: &Path) -> Result<Config> {
     match path.extension().and_then(|e| e.to_str()) {
         Some("toml") => toml::from_str(content).with_context(context),
         Some("json" | "jsonc" | "json5") => json5::from_str(content).with_context(context),
-        Some("yaml" | "yml") => serde_yaml::from_str(content).with_context(context),
+        Some("yaml" | "yml") => serde_yaml_ng::from_str(content).with_context(context),
         _ => bail!("unsupported config file extension: {}", path.display()),
     }
 }
