@@ -123,6 +123,7 @@ pub fn plan(
         }
         owned.insert(name);
     }
+    planner.owned = owned.iter().map(|name| (*name).clone()).collect();
 
     // Removals come first, so that a target can move between packages in one sync.
     for (name, record) in &state.packages {
@@ -223,6 +224,8 @@ struct Planner<'a> {
     created_dirs: HashSet<PathBuf>,
     /// Targets that earlier steps unlink.
     unlinked: Vec<PathBuf>,
+    /// Packages of this config that the plan links.
+    owned: HashSet<String>,
 }
 
 enum Entry {
@@ -243,6 +246,7 @@ impl<'a> Planner<'a> {
             removed: HashSet::new(),
             created_dirs: HashSet::new(),
             unlinked: Vec::new(),
+            owned: HashSet::new(),
         }
     }
 
@@ -328,10 +332,11 @@ impl<'a> Planner<'a> {
     }
 
     fn link(&mut self, name: &str, record: Option<&PackageRecord>, target: &Path, source: &Path) {
+        // A package of this config gives up its targets only when this plan also updates it.
         let owner = self.state.packages.iter().find(|(other, other_record)| {
-            *other != name
-                && other_record.config != self.config
-                && other_record.targets.contains_key(target)
+            let updated = other_record.config == self.config
+                && (self.owned.contains(*other) || self.plan.records.contains_key(*other));
+            *other != name && !updated && other_record.targets.contains_key(target)
         });
         if let Some((owner, _)) = owner {
             self.plan.conflicts.push(Conflict::OwnedBy {
@@ -965,5 +970,30 @@ mod tests {
             plan.notes,
             ["~/x has no entries left, symsync does not remove directories"]
         );
+    }
+
+    #[test]
+    fn target_of_out_of_scope_package_is_a_conflict() {
+        let mut f = fixture();
+        let plan = f.plan(
+            LinkType::Absolute,
+            &f.desired(&[("p", &[("home/a", "repo/a")]), ("q", &[])]),
+        );
+        f.apply(plan);
+
+        let plan = f.plan_scoped(&f.desired(&[("q", &[("home/a", "repo/a")])]), &["q"]);
+        assert_eq!(
+            plan.conflicts,
+            [Conflict::OwnedBy {
+                target: f.path("home/a"),
+                package: "p".into()
+            }]
+        );
+
+        let plan = f.plan_scoped(
+            &f.desired(&[("p", &[]), ("q", &[("home/a", "repo/a")])]),
+            &["p", "q"],
+        );
+        assert!(plan.conflicts.is_empty(), "{:?}", plan.conflicts);
     }
 }
