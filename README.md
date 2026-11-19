@@ -6,6 +6,26 @@ Each target links to a state link in a machine-local state directory, and the st
 
 See the [design document](docs/design.md) for the full design.
 
+## Installing
+
+Symsync runs on macOS and Linux. It is not on crates.io yet, so you install it from source with Cargo. You need Rust 1.89 or later.
+
+To install the latest version from GitHub:
+
+```sh
+cargo install --git https://github.com/palani-johnson/symsync
+```
+
+To install from a local clone:
+
+```sh
+git clone https://github.com/palani-johnson/symsync
+cd symsync
+cargo install --path .
+```
+
+Both commands put the `symsync` binary in `~/.cargo/bin`. Make sure that this directory is on your `PATH`.
+
 ## How it works
 
 Every managed file is a chain of two links:
