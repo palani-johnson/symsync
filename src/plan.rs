@@ -11,9 +11,20 @@ use crate::state::{PackageRecord, State};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     CreateDir(PathBuf),
-    CreateLink { path: PathBuf, value: PathBuf },
-    ReplaceLink { path: PathBuf, value: PathBuf },
+    CreateLink {
+        path: PathBuf,
+        value: PathBuf,
+    },
+    ReplaceLink {
+        path: PathBuf,
+        value: PathBuf,
+    },
     RemoveLink(PathBuf),
+    /// Replaces the content of `to` with the regular file `from`, then removes `from`.
+    MoveFile {
+        from: PathBuf,
+        to: PathBuf,
+    },
 }
 
 /// An action, with the line to show for it. Actions on state links have no line of their own.
@@ -186,6 +197,42 @@ pub fn plan_remove(state: &State, name: &str, record: &PackageRecord, home: &Pat
         planner.unlink(target);
     }
     planner.plan.records.insert(name.to_string(), None);
+
+    planner.plan
+}
+
+/// Plans to move a drifted target back into its source and to link the target again.
+pub fn plan_adopt(
+    state: &State,
+    name: &str,
+    record: &PackageRecord,
+    target: &Path,
+    home: &Path,
+) -> Plan {
+    let mut planner = Planner {
+        state,
+        config: &record.config,
+        link_type: record.link_type,
+        home,
+        plan: Plan::default(),
+        removed: HashSet::new(),
+        created_dirs: HashSet::new(),
+    };
+    let source = &record.targets[target];
+
+    planner.push(
+        Some(format!(
+            "adopt   {} -> {}",
+            planner.show(target),
+            planner.show(source)
+        )),
+        Action::MoveFile {
+            from: target.to_path_buf(),
+            to: source.clone(),
+        },
+    );
+    planner.removed.insert(target.to_path_buf());
+    planner.link(name, Some(record), target, source);
 
     planner.plan
 }
@@ -819,5 +866,27 @@ mod tests {
         assert!(!link.is_symlink());
         assert!(f.state.packages.is_empty());
         assert!(f.path("repo/a").is_file());
+    }
+
+    #[test]
+    fn adopt_moves_drifted_file_and_relinks() {
+        let mut f = fixture();
+        let plan = f.plan(
+            LinkType::Absolute,
+            &f.desired(&[("p", &[("home/a", "repo/a")])]),
+        );
+        f.apply(plan);
+        std::fs::remove_file(f.path("home/a")).unwrap();
+        std::fs::write(f.path("home/a"), "edited").unwrap();
+
+        let record = f.state.packages["p"].clone();
+        let plan = plan_adopt(&f.state, "p", &record, &f.path("home/a"), &f.home);
+        assert!(plan.conflicts.is_empty(), "{:?}", plan.conflicts);
+        assert!(plan.records.is_empty());
+
+        f.apply(plan);
+        assert_eq!(std::fs::read_to_string(f.path("repo/a")).unwrap(), "edited");
+        assert!(f.path("home/a").is_symlink());
+        assert_eq!(std::fs::read_to_string(f.path("home/a")).unwrap(), "edited");
     }
 }

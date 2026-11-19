@@ -28,7 +28,19 @@ fn run(action: &Action) -> Result<()> {
             create_link(path, value)
         }
         Action::RemoveLink(path) => remove_link(path),
+        Action::MoveFile { from, to } => move_file(from, to),
     }
+}
+
+fn move_file(from: &Path, to: &Path) -> Result<()> {
+    let meta = std::fs::symlink_metadata(from)
+        .with_context(|| format!("failed to read {}", from.display()))?;
+    if !meta.is_file() {
+        bail!("{} is not a regular file", from.display());
+    }
+    std::fs::copy(from, to)
+        .with_context(|| format!("failed to copy {} to {}", from.display(), to.display()))?;
+    std::fs::remove_file(from).with_context(|| format!("failed to remove {}", from.display()))
 }
 
 fn create_link(path: &Path, value: &Path) -> Result<()> {
@@ -142,5 +154,38 @@ mod tests {
         let mut seen = Vec::new();
         run_steps(&steps, |m| seen.push(m.to_string())).unwrap();
         assert_eq!(seen, ["one", "two"]);
+    }
+
+    #[test]
+    fn moves_file_content_over_destination() {
+        let tmp = tempfile::tempdir().unwrap();
+        let from = tmp.path().join("from");
+        let to = tmp.path().join("to");
+        std::fs::write(&from, "new").unwrap();
+        std::fs::write(&to, "old").unwrap();
+
+        let action = Action::MoveFile {
+            from: from.clone(),
+            to: to.clone(),
+        };
+        run_steps(&[step(action)], |_| {}).unwrap();
+        assert_eq!(std::fs::read_to_string(&to).unwrap(), "new");
+        assert!(!from.exists());
+    }
+
+    #[test]
+    fn does_not_move_symlinks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let from = tmp.path().join("from");
+        let to = tmp.path().join("to");
+        std::fs::write(&to, "old").unwrap();
+        symlink(&to, &from).unwrap();
+
+        let action = Action::MoveFile {
+            from: from.clone(),
+            to: to.clone(),
+        };
+        assert!(run_steps(&[step(action)], |_| {}).is_err());
+        assert!(from.is_symlink());
     }
 }

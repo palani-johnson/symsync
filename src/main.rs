@@ -71,7 +71,7 @@ fn main() -> Result<()> {
         Command::Sync => cmd_sync(&cli),
         Command::Status => cmd_status(&cli),
         Command::Remove { package } => cmd_remove(&cli, package),
-        Command::Adopt { .. } => bail!("not implemented"),
+        Command::Adopt { target } => cmd_adopt(&cli, target),
         Command::Config => {
             let loaded = LoadedConfig::load(cli.config.as_deref(), &std::env::current_dir()?)?;
             println!("{}", serde_json::to_string_pretty(&loaded.config)?);
@@ -254,5 +254,44 @@ fn cmd_remove(cli: &Cli, package: &str) -> Result<()> {
             paths::display(&record.config, &env.home)
         );
     }
+    Ok(())
+}
+
+fn cmd_adopt(cli: &Cli, target: &std::path::Path) -> Result<()> {
+    let env = Env::from_process()?;
+    let target = paths::normalize(&env.cwd.join(target));
+    let state_dir = optional_state_dir(cli, &env)?;
+    let not_managed = || anyhow::anyhow!("{} is not managed by symsync", target.display());
+    if !state_dir.exists() {
+        return Err(not_managed());
+    }
+
+    let state = State::open(&state_dir)?;
+    let (name, record) = state
+        .packages
+        .iter()
+        .find(|(_, record)| record.targets.contains_key(&target))
+        .map(|(name, record)| (name.clone(), record.clone()))
+        .ok_or_else(not_managed)?;
+
+    let health = health::check(&state, &target, &record.targets[&target]);
+    if health != health::Health::Drifted {
+        bail!(
+            "{} is not drifted, its status is: {health}",
+            target.display()
+        );
+    }
+
+    let plan = plan::plan_adopt(&state, &name, &record, &target, &env.home);
+    if !plan.conflicts.is_empty() {
+        print_findings(&plan);
+        bail!(
+            "adopt stopped by {} conflict(s), nothing was changed",
+            plan.conflicts.len()
+        );
+    }
+
+    execute::run_steps(&plan.steps, |message| println!("{message}"))?;
+    print_findings(&plan);
     Ok(())
 }
