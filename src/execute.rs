@@ -7,6 +7,37 @@ use anyhow::{Context, Result, bail};
 use crate::plan::{Action, Step};
 use crate::state::{PackageRecord, State};
 
+/// Runs the steps of a plan and saves its package records.
+///
+/// Before any change, each changed package is saved with the union of its old and new targets. If a step fails, every link that can be on disk is still recorded, and the next sync cleans up.
+pub fn apply(
+    state: &mut State,
+    steps: &[Step],
+    records: BTreeMap<String, Option<PackageRecord>>,
+    report: impl FnMut(&str),
+) -> Result<()> {
+    if !steps.is_empty() {
+        for (name, record) in &records {
+            let Some(new) = record else { continue };
+            let mut merged = new.clone();
+            if let Some(old) = state.packages.get(name) {
+                for (target, source) in &old.targets {
+                    merged
+                        .targets
+                        .entry(target.clone())
+                        .or_insert_with(|| source.clone());
+                }
+            }
+            state.packages.insert(name.clone(), merged);
+        }
+        state.save()?;
+        run_steps(steps, report)?;
+    }
+
+    update_records(state, records);
+    state.save()
+}
+
 /// Runs steps in order and stops at the first error. `report` gets the message of each step before it runs.
 pub fn run_steps(steps: &[Step], mut report: impl FnMut(&str)) -> Result<()> {
     for step in steps {
@@ -187,5 +218,53 @@ mod tests {
         };
         assert!(run_steps(&[step(action)], |_| {}).is_err());
         assert!(from.is_symlink());
+    }
+
+    #[test]
+    fn failed_apply_keeps_old_and_new_targets_recorded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("state");
+        let record = |targets: &[&str]| PackageRecord {
+            config: tmp.path().join("symsync.toml"),
+            link_type: crate::config::LinkType::Absolute,
+            targets: targets
+                .iter()
+                .map(|t| (tmp.path().join(t), tmp.path().join("source")))
+                .collect(),
+        };
+
+        let mut state = State::open(&dir).unwrap();
+        state.packages.insert("p".into(), record(&["old"]));
+        let records = BTreeMap::from([("p".to_string(), Some(record(&["new"])))]);
+        let failing = step(Action::RemoveLink(tmp.path().join("missing")));
+
+        assert!(apply(&mut state, &[failing], records, |_| {}).is_err());
+        drop(state);
+
+        let saved = State::read(&dir).unwrap();
+        let targets: Vec<_> = saved.packages["p"].targets.keys().collect();
+        assert_eq!(targets, [&tmp.path().join("new"), &tmp.path().join("old")]);
+    }
+
+    #[test]
+    fn successful_apply_saves_new_records() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("state");
+        let mut state = State::open(&dir).unwrap();
+        state.packages.insert(
+            "p".into(),
+            PackageRecord {
+                config: tmp.path().join("symsync.toml"),
+                link_type: crate::config::LinkType::Absolute,
+                targets: BTreeMap::new(),
+            },
+        );
+
+        let create = step(Action::CreateDir(tmp.path().join("d")));
+        let records = BTreeMap::from([("p".to_string(), None)]);
+        apply(&mut state, &[create], records, |_| {}).unwrap();
+        drop(state);
+
+        assert!(State::read(&dir).unwrap().packages.is_empty());
     }
 }

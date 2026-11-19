@@ -184,14 +184,14 @@ fn cmd_sync(cli: &Cli) -> Result<()> {
         );
     }
 
-    execute::run_steps(&plan.steps, |message| println!("{message}"))?;
+    execute::apply(&mut state, &plan.steps, plan.records.clone(), |message| {
+        println!("{message}")
+    })?;
     print_findings(&plan, &ctx.env.home);
     if plan.steps.is_empty() {
         println!("already in sync");
     }
-
-    execute::update_records(&mut state, plan.records);
-    state.save()
+    Ok(())
 }
 
 /// The state directory for commands that do not need a config. A config is used only if one is given or found.
@@ -252,10 +252,10 @@ fn cmd_remove(cli: &Cli, package: &str) -> Result<()> {
         );
     }
 
-    execute::run_steps(&plan.steps, |message| println!("{message}"))?;
+    execute::apply(&mut state, &plan.steps, plan.records.clone(), |message| {
+        println!("{message}")
+    })?;
     print_findings(&plan, &env.home);
-    execute::update_records(&mut state, plan.records);
-    state.save()?;
 
     println!("removed package {package}");
     if record.config.exists() && still_defines(&record.config, package) {
