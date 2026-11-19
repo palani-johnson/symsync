@@ -327,3 +327,15 @@ fn state_dir_reached_through_a_symlink_is_the_same_state() {
     let out = stdout(&s.run("repo", &["status"]).success());
     assert!(!out.contains("stray"), "{out}");
 }
+
+#[test]
+fn broken_config_does_not_block_status() {
+    let s = sandbox();
+    s.zsh_repo("repo");
+    s.run("repo", &["sync"]).success();
+    s.write("repo/symsync.toml", "this is not toml");
+
+    let out = stdout(&s.run("repo", &["status"]).success());
+    assert!(out.contains("warning: ignoring the config"), "{out}");
+    assert!(out.contains("zsh"), "{out}");
+}

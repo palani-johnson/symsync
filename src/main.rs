@@ -241,7 +241,15 @@ fn cmd_sync(cli: &Cli, packages: &[String]) -> Result<()> {
 
 /// The state directory for commands that do not need a config. A config is used only if one is given or found.
 fn optional_state_dir(cli: &Cli, env: &Env) -> Result<PathBuf> {
-    let loaded = LoadedConfig::load_optional(cli.config.as_deref(), &env.cwd)?;
+    // A broken config in the current directory must not block recovery commands.
+    let loaded = match LoadedConfig::load_optional(cli.config.as_deref(), &env.cwd) {
+        Ok(loaded) => loaded,
+        Err(err) if cli.config.is_none() => {
+            println!("warning: ignoring the config in the current directory: {err:#}");
+            None
+        }
+        Err(err) => return Err(err),
+    };
     Ok(paths::canonicalize_existing(&settings::state_dir(
         cli.state_dir.as_deref(),
         env,

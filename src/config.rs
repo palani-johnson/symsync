@@ -39,6 +39,7 @@ pub struct Config {
     pub link_type: Option<LinkType>,
 
     /// Packages, keyed by name. Names must be unique in a state directory.
+    #[serde(default)]
     pub packages: BTreeMap<String, Package>,
 }
 
@@ -223,6 +224,13 @@ packages:
     fn rejects_unknown_fields() {
         let content = "[[packages.a.links]]\nsources = []\ntarget = \"~\"\nlink_typ = \"relative\"";
         assert!(parse(content, Path::new("symsync.toml")).is_err());
+    }
+
+    #[test]
+    fn packages_are_optional() {
+        let config = parse("state_dir = \".state\"", Path::new("symsync.toml")).unwrap();
+        assert!(config.packages.is_empty());
+        assert!(parse("", Path::new("symsync.toml")).is_ok());
     }
 
     #[test]
