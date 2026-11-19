@@ -1,7 +1,11 @@
+mod config;
+
 use std::path::PathBuf;
 
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
+
+use config::LoadedConfig;
 
 /// A stateful symlink farm manager.
 #[derive(Parser, Debug)]
@@ -57,8 +61,15 @@ fn main() -> Result<()> {
         | Command::Sync
         | Command::Status
         | Command::Remove { .. }
-        | Command::Adopt { .. }
-        | Command::Config
-        | Command::GenConfigSchema => bail!("not implemented"),
+        | Command::Adopt { .. } => bail!("not implemented"),
+        Command::Config => {
+            let loaded = LoadedConfig::load(cli.config.as_deref(), &std::env::current_dir()?)?;
+            println!("{}", serde_json::to_string_pretty(&loaded.config)?);
+            Ok(())
+        }
+        Command::GenConfigSchema => {
+            println!("{}", serde_json::to_string_pretty(&config::schema())?);
+            Ok(())
+        }
     }
 }
