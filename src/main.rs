@@ -1,4 +1,5 @@
 mod config;
+mod desired;
 mod paths;
 mod settings;
 mod state;
