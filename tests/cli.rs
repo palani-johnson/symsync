@@ -270,3 +270,22 @@ target = "out"
     let out = sync("copy");
     assert!(out.contains("already in sync"), "{out}");
 }
+
+#[test]
+fn package_filter_limits_sync() {
+    let s = sandbox();
+    s.zsh_repo("repo");
+    s.write(
+        "repo/symsync.toml",
+        &format!(
+            "{ZSH_CONFIG}\n[[packages.git.links]]\nroot = \"git\"\nsources = [\"*\"]\ntarget = \"~/.config/git\"\n"
+        ),
+    );
+    s.write("repo/git/config", "git");
+
+    s.run("repo", &["sync", "--package", "git"]).success();
+    assert!(is_link(&s.path("home/.config/git/config")));
+    assert!(!is_link(&s.path("home/.zshrc")));
+
+    s.run("repo", &["sync", "-p", "nope"]).failure();
+}

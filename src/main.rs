@@ -7,6 +7,7 @@ mod plan;
 mod settings;
 mod state;
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use anyhow::{Result, bail};
@@ -36,10 +37,18 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Command {
     /// Show the changes that sync would make.
-    Plan,
+    Plan {
+        /// Only plan these packages. Can be given more than once.
+        #[arg(short, long = "package", value_name = "NAME")]
+        packages: Vec<String>,
+    },
 
     /// Apply the plan for all packages in the config.
-    Sync,
+    Sync {
+        /// Only sync these packages. Can be given more than once.
+        #[arg(short, long = "package", value_name = "NAME")]
+        packages: Vec<String>,
+    },
 
     /// Show all packages and the health of their targets.
     Status,
@@ -67,8 +76,8 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match &cli.command {
-        Command::Plan => cmd_plan(&cli),
-        Command::Sync => cmd_sync(&cli),
+        Command::Plan { packages } => cmd_plan(&cli, packages),
+        Command::Sync { packages } => cmd_sync(&cli, packages),
         Command::Status => cmd_status(&cli),
         Command::Remove { package } => cmd_remove(&cli, package),
         Command::Adopt { target } => cmd_adopt(&cli, target),
@@ -90,17 +99,26 @@ struct Context {
     loaded: LoadedConfig,
     state_dir: PathBuf,
     link_type: LinkType,
-    desired: std::collections::BTreeMap<String, Targets>,
-    warnings: Vec<String>,
+    desired: BTreeMap<String, Targets>,
+    warnings: Vec<(String, String)>,
+    /// Packages to plan, or `None` for all of them.
+    scope: Option<BTreeSet<String>>,
 }
 
 impl Context {
-    fn load(cli: &Cli) -> Result<Self> {
+    fn load(cli: &Cli, packages: &[String]) -> Result<Self> {
         let env = Env::from_process()?;
         let loaded = LoadedConfig::load(cli.config.as_deref(), &env.cwd)?;
         let state_dir = settings::state_dir(cli.state_dir.as_deref(), &env, Some(&loaded));
         let link_type = settings::link_type(&env, Some(&loaded))?;
-        let expansion = desired::expand(&loaded, &env.home, &state_dir)?;
+        let mut expansion = desired::expand(&loaded, &env.home, &state_dir)?;
+
+        let scope =
+            (!packages.is_empty()).then(|| packages.iter().cloned().collect::<BTreeSet<String>>());
+        if let Some(scope) = &scope {
+            expansion.packages.retain(|name, _| scope.contains(name));
+            expansion.warnings.retain(|(name, _)| scope.contains(name));
+        }
 
         Ok(Self {
             env,
@@ -109,24 +127,40 @@ impl Context {
             link_type,
             desired: expansion.packages,
             warnings: expansion.warnings,
+            scope,
         })
     }
 
     fn print_warnings(&self) {
-        for warning in &self.warnings {
-            println!("warning: {warning}");
+        for (package, warning) in &self.warnings {
+            println!("warning: package {package}: {warning}");
         }
     }
 
-    fn plan(&self, state: &State) -> plan::Plan {
-        plan::plan(
+    fn plan(&self, state: &State) -> Result<plan::Plan> {
+        for name in self.scope.iter().flatten() {
+            let in_config = self.loaded.config.packages.contains_key(name);
+            let in_state = state
+                .packages
+                .get(name)
+                .is_some_and(|record| record.config == self.loaded.path);
+            if !in_config && !in_state {
+                bail!(
+                    "no package {name} in {}",
+                    paths::display(&self.loaded.path, &self.env.home)
+                );
+            }
+        }
+
+        Ok(plan::plan(
             state,
             &self.loaded.path,
             self.link_type,
             &self.desired,
             &self.env.home,
             &still_defines,
-        )
+            self.scope.as_ref(),
+        ))
     }
 }
 
@@ -150,10 +184,10 @@ fn print_findings(plan: &plan::Plan, home: &std::path::Path) {
     }
 }
 
-fn cmd_plan(cli: &Cli) -> Result<()> {
-    let ctx = Context::load(cli)?;
+fn cmd_plan(cli: &Cli, packages: &[String]) -> Result<()> {
+    let ctx = Context::load(cli, packages)?;
     let state = State::read(&ctx.state_dir)?;
-    let plan = ctx.plan(&state);
+    let plan = ctx.plan(&state)?;
     ctx.print_warnings();
 
     for message in plan.steps.iter().filter_map(|s| s.message.as_deref()) {
@@ -170,10 +204,10 @@ fn cmd_plan(cli: &Cli) -> Result<()> {
     Ok(())
 }
 
-fn cmd_sync(cli: &Cli) -> Result<()> {
-    let ctx = Context::load(cli)?;
+fn cmd_sync(cli: &Cli, packages: &[String]) -> Result<()> {
+    let ctx = Context::load(cli, packages)?;
     let mut state = State::open(&ctx.state_dir)?;
-    let plan = ctx.plan(&state);
+    let plan = ctx.plan(&state)?;
     ctx.print_warnings();
 
     if !plan.conflicts.is_empty() {

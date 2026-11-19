@@ -13,8 +13,8 @@ pub type Targets = BTreeMap<PathBuf, PathBuf>;
 #[derive(Debug, Default)]
 pub struct Expansion {
     pub packages: BTreeMap<String, Targets>,
-    /// Problems that do not stop sync, such as a glob that matches no files.
-    pub warnings: Vec<String>,
+    /// Problems that do not stop sync, such as a glob that matches no files, with the package they belong to.
+    pub warnings: Vec<(String, String)>,
 }
 
 /// Expands the globs of every package in the config into the targets the package wants. The config file and files that belong to the state directory at `state_dir` are never sources.
@@ -58,9 +58,9 @@ pub fn expand(loaded: &LoadedConfig, home: &Path, state_dir: &Path) -> Result<Ex
                     targets.insert(target, path);
                 }
                 if !matched {
-                    expansion.warnings.push(format!(
-                        "package {name}: glob {source} in {} matched no files",
-                        display(&root, home)
+                    expansion.warnings.push((
+                        name.clone(),
+                        format!("glob {source} in {} matched no files", display(&root, home)),
                     ));
                 }
             }
@@ -322,8 +322,9 @@ mod tests {
         let expansion = expand(&loaded, &f.home, &f.state).unwrap();
         assert_eq!(expansion.packages["p"].len(), 1);
         assert_eq!(expansion.warnings.len(), 1);
+        assert_eq!(expansion.warnings[0].0, "p");
         assert!(
-            expansion.warnings[0].contains("*.md"),
+            expansion.warnings[0].1.contains("*.md"),
             "{:?}",
             expansion.warnings
         );

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::config::LinkType;
@@ -89,7 +89,7 @@ pub struct Plan {
 
 /// Plans the changes for the packages that `config` wants. Reads the file system but does not change it.
 ///
-/// `still_defines` tells if the config at a path still defines a package. It must return `true` when it cannot tell.
+/// `still_defines` tells if the config at a path still defines a package. It must return `true` when it cannot tell. When `scope` is set, packages outside of it are left alone, even if the config no longer defines them.
 pub fn plan(
     state: &State,
     config: &Path,
@@ -97,6 +97,7 @@ pub fn plan(
     desired: &BTreeMap<String, Targets>,
     home: &Path,
     still_defines: &dyn Fn(&Path, &str) -> bool,
+    scope: Option<&BTreeSet<String>>,
 ) -> Plan {
     let mut planner = Planner {
         state,
@@ -108,8 +109,10 @@ pub fn plan(
         created_dirs: HashSet::new(),
     };
 
+    let in_scope = |name: &String| scope.is_none_or(|scope| scope.contains(name));
+
     let mut owned = HashSet::new();
-    for name in desired.keys() {
+    for name in desired.keys().filter(|name| in_scope(name)) {
         match state.packages.get(name) {
             Some(record) if record.config == config => {}
             Some(record) if still_defines(&record.config, name) => {
@@ -139,7 +142,7 @@ pub fn plan(
                     }
                 }
             }
-            None if record.config == config => {
+            None if record.config == config && in_scope(name) => {
                 planner
                     .plan
                     .notes
@@ -473,6 +476,19 @@ mod tests {
             self.plan_with(link_type, desired, &|_, _| true)
         }
 
+        fn plan_scoped(&self, desired: &BTreeMap<String, Targets>, scope: &[&str]) -> Plan {
+            let scope = scope.iter().map(|s| s.to_string()).collect();
+            plan(
+                &self.state,
+                &self.config,
+                LinkType::Absolute,
+                desired,
+                &self.home,
+                &|_, _| true,
+                Some(&scope),
+            )
+        }
+
         fn plan_with(
             &self,
             link_type: LinkType,
@@ -486,6 +502,7 @@ mod tests {
                 desired,
                 &self.home,
                 still_defines,
+                None,
             )
         }
 
@@ -883,5 +900,31 @@ mod tests {
         assert_eq!(std::fs::read_to_string(f.path("repo/a")).unwrap(), "edited");
         assert!(f.path("home/a").is_symlink());
         assert_eq!(std::fs::read_to_string(f.path("home/a")).unwrap(), "edited");
+    }
+
+    #[test]
+    fn scope_limits_plan_to_named_packages() {
+        let mut f = fixture();
+        let plan = f.plan(
+            LinkType::Absolute,
+            &f.desired(&[
+                ("p", &[("home/a", "repo/a")]),
+                ("q", &[("home/b", "repo/b")]),
+            ]),
+        );
+        f.apply(plan);
+        std::fs::remove_file(f.path("home/b")).unwrap();
+
+        // p is gone from the config and q needs a repair, but only q is in scope.
+        let plan = f.plan_scoped(&f.desired(&[("q", &[("home/b", "repo/b")])]), &["q"]);
+        assert_eq!(
+            messages(&plan),
+            [format!("link    ~/b -> {}", f.path("repo/b").display())]
+        );
+        assert!(!plan.records.contains_key("p"));
+
+        let plan = f.plan_scoped(&f.desired(&[("q", &[("home/b", "repo/b")])]), &["p"]);
+        assert_eq!(messages(&plan), ["unlink  ~/a"]);
+        assert_eq!(plan.records["p"], None);
     }
 }
