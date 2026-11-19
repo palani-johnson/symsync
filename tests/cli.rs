@@ -289,3 +289,21 @@ fn package_filter_limits_sync() {
 
     s.run("repo", &["sync", "-p", "nope"]).failure();
 }
+
+#[test]
+fn stray_state_links_are_reported_and_pruned() {
+    let s = sandbox();
+    s.zsh_repo("repo");
+    s.run("repo", &["sync"]).success();
+    let stray = s.state.join("links/stray");
+    std::os::unix::fs::symlink("/nowhere", &stray).unwrap();
+
+    let out = stdout(&s.run("repo", &["status"]).success());
+    assert!(out.contains("stray state links"), "{out}");
+
+    s.run("repo", &["prune"]).success();
+    assert!(!is_link(&stray));
+    assert_eq!(s.read("home/.zshrc"), "zshrc");
+    let out = stdout(&s.run("repo", &["prune"]).success());
+    assert!(out.contains("nothing to prune"), "{out}");
+}

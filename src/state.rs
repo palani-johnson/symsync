@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
@@ -80,6 +80,33 @@ impl State {
     pub fn link_path(&self, target: &Path) -> PathBuf {
         self.links_dir()
             .join(state_link_name(&relative(target, &self.dir)))
+    }
+
+    /// Entries in the links directory that no package records.
+    pub fn stray_links(&self) -> Result<Vec<PathBuf>> {
+        let links_dir = self.links_dir();
+        if !links_dir.exists() {
+            return Ok(Vec::new());
+        }
+
+        let recorded: HashSet<PathBuf> = self
+            .packages
+            .values()
+            .flat_map(|record| record.targets.keys())
+            .map(|target| self.link_path(target))
+            .collect();
+
+        let mut stray = Vec::new();
+        for entry in std::fs::read_dir(&links_dir)
+            .with_context(|| format!("failed to read {}", links_dir.display()))?
+        {
+            let path = entry?.path();
+            if !recorded.contains(&path) {
+                stray.push(path);
+            }
+        }
+        stray.sort();
+        Ok(stray)
     }
 
     /// Writes the packages file atomically.
@@ -299,5 +326,21 @@ mod tests {
             before.link_path(Path::new("/a/repo/out/x")).file_name(),
             after.link_path(Path::new("/b/copy/out/x")).file_name()
         );
+    }
+
+    #[test]
+    fn finds_stray_links() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = State::open(&tmp.path().join("state")).unwrap();
+        let expected = record(tmp.path(), LinkType::Absolute);
+        let target = expected.targets.keys().next().unwrap().clone();
+        state.packages.insert("zsh".into(), expected);
+
+        let recorded = state.link_path(&target);
+        let stray = state.links_dir().join("stray");
+        std::os::unix::fs::symlink("/x", &recorded).unwrap();
+        std::os::unix::fs::symlink("/x", &stray).unwrap();
+
+        assert_eq!(state.stray_links().unwrap(), [stray]);
     }
 }

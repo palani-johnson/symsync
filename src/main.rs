@@ -59,6 +59,9 @@ enum Command {
         package: String,
     },
 
+    /// Remove state links that no package records.
+    Prune,
+
     /// Move a drifted target back into its source and restore the link.
     Adopt {
         /// Path of the drifted target.
@@ -80,6 +83,7 @@ fn main() -> Result<()> {
         Command::Sync { packages } => cmd_sync(&cli, packages),
         Command::Status => cmd_status(&cli),
         Command::Remove { package } => cmd_remove(&cli, package),
+        Command::Prune => cmd_prune(&cli),
         Command::Adopt { target } => cmd_adopt(&cli, target),
         Command::Config => {
             let loaded = LoadedConfig::load(cli.config.as_deref(), &std::env::current_dir()?)?;
@@ -247,7 +251,6 @@ fn cmd_status(cli: &Cli) -> Result<()> {
     println!("state: {}", show(&state_dir));
     if state.packages.is_empty() {
         println!("no packages");
-        return Ok(());
     }
 
     for (name, record) in &state.packages {
@@ -262,7 +265,43 @@ fn cmd_status(cli: &Cli) -> Result<()> {
             println!("  {:<18} {}", health.to_string(), show(target));
         }
     }
+
+    let stray = state.stray_links()?;
+    if !stray.is_empty() {
+        println!("stray state links, run `symsync prune` to remove them");
+        for link in stray {
+            println!("  {}", show(&link));
+        }
+    }
     Ok(())
+}
+
+fn cmd_prune(cli: &Cli) -> Result<()> {
+    let env = Env::from_process()?;
+    let state_dir = optional_state_dir(cli, &env)?;
+    if !state_dir.exists() {
+        println!("nothing to prune");
+        return Ok(());
+    }
+
+    let state = State::open(&state_dir)?;
+    let mut steps = Vec::new();
+    for link in state.stray_links()? {
+        let shown = paths::display(&link, &env.home);
+        if link.is_symlink() {
+            steps.push(plan::Step {
+                message: Some(format!("remove  {shown}")),
+                action: plan::Action::RemoveLink(link),
+            });
+        } else {
+            println!("note: {shown} is not a symlink, it was left in place");
+        }
+    }
+
+    if steps.is_empty() {
+        println!("nothing to prune");
+    }
+    execute::run_steps(&steps, |message| println!("{message}"))
 }
 
 fn cmd_remove(cli: &Cli, package: &str) -> Result<()> {
