@@ -1,4 +1,0 @@
-[[entries]]
-sources = ["*.txt"]
-target = "out"
-target_link_type = "relative"
