@@ -133,12 +133,12 @@ fn still_defines(config: &std::path::Path, package: &str) -> bool {
     }
 }
 
-fn print_findings(plan: &plan::Plan) {
+fn print_findings(plan: &plan::Plan, home: &std::path::Path) {
     for note in &plan.notes {
         println!("note: {note}");
     }
     for conflict in &plan.conflicts {
-        println!("conflict: {conflict}");
+        println!("conflict: {}", conflict.message(home));
     }
 }
 
@@ -150,7 +150,7 @@ fn cmd_plan(cli: &Cli) -> Result<()> {
     for message in plan.steps.iter().filter_map(|s| s.message.as_deref()) {
         println!("{message}");
     }
-    print_findings(&plan);
+    print_findings(&plan, &ctx.env.home);
 
     if !plan.conflicts.is_empty() {
         bail!("sync is blocked by {} conflict(s)", plan.conflicts.len());
@@ -167,7 +167,7 @@ fn cmd_sync(cli: &Cli) -> Result<()> {
     let plan = ctx.plan(&state);
 
     if !plan.conflicts.is_empty() {
-        print_findings(&plan);
+        print_findings(&plan, &ctx.env.home);
         bail!(
             "sync stopped by {} conflict(s), nothing was changed",
             plan.conflicts.len()
@@ -175,7 +175,7 @@ fn cmd_sync(cli: &Cli) -> Result<()> {
     }
 
     execute::run_steps(&plan.steps, |message| println!("{message}"))?;
-    print_findings(&plan);
+    print_findings(&plan, &ctx.env.home);
     if plan.steps.is_empty() {
         println!("already in sync");
     }
@@ -235,7 +235,7 @@ fn cmd_remove(cli: &Cli, package: &str) -> Result<()> {
     let plan = plan::plan_remove(&state, package, &record, &env.home);
 
     if !plan.conflicts.is_empty() {
-        print_findings(&plan);
+        print_findings(&plan, &env.home);
         bail!(
             "remove stopped by {} conflict(s), nothing was changed",
             plan.conflicts.len()
@@ -243,7 +243,7 @@ fn cmd_remove(cli: &Cli, package: &str) -> Result<()> {
     }
 
     execute::run_steps(&plan.steps, |message| println!("{message}"))?;
-    print_findings(&plan);
+    print_findings(&plan, &env.home);
     execute::update_records(&mut state, plan.records);
     state.save()?;
 
@@ -284,7 +284,7 @@ fn cmd_adopt(cli: &Cli, target: &std::path::Path) -> Result<()> {
 
     let plan = plan::plan_adopt(&state, &name, &record, &target, &env.home);
     if !plan.conflicts.is_empty() {
-        print_findings(&plan);
+        print_findings(&plan, &env.home);
         bail!(
             "adopt stopped by {} conflict(s), nothing was changed",
             plan.conflicts.len()
@@ -292,6 +292,6 @@ fn cmd_adopt(cli: &Cli, target: &std::path::Path) -> Result<()> {
     }
 
     execute::run_steps(&plan.steps, |message| println!("{message}"))?;
-    print_findings(&plan);
+    print_findings(&plan, &env.home);
     Ok(())
 }

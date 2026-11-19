@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, HashSet};
-use std::fmt;
 use std::path::{Path, PathBuf};
 
 use crate::config::LinkType;
@@ -46,36 +45,32 @@ pub enum Conflict {
     PackageElsewhere { package: String, config: PathBuf },
 }
 
-impl fmt::Display for Conflict {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Conflict {
+    /// Text for output, with `~` for the home directory.
+    pub fn message(&self, home: &Path) -> String {
+        let show = |path: &Path| display(path, home);
         match self {
-            Self::Exists(target) => write!(
-                f,
-                "{} exists and is not managed by symsync",
-                target.display()
-            ),
-            Self::Drifted(target) => write!(
-                f,
-                "{} was replaced by a regular file, use `symsync adopt` to recover it",
-                target.display()
-            ),
-            Self::ForeignLink(target) => write!(
-                f,
-                "{} is a symlink that symsync does not manage",
-                target.display()
-            ),
-            Self::OwnedBy { target, package } => {
-                write!(f, "{} is owned by package {package}", target.display())
+            Self::Exists(target) => {
+                format!("{} exists and is not managed by symsync", show(target))
             }
-            Self::NotALink(path) => write!(f, "state link {} is not a symlink", path.display()),
-            Self::ParentNotDir { target, parent } => write!(
-                f,
+            Self::Drifted(target) => format!(
+                "{} was replaced by a regular file, use `symsync adopt` to recover it",
+                show(target)
+            ),
+            Self::ForeignLink(target) => {
+                format!("{} is a symlink that symsync does not manage", show(target))
+            }
+            Self::OwnedBy { target, package } => {
+                format!("{} is owned by package {package}", show(target))
+            }
+            Self::NotALink(path) => format!("state link {} is not a symlink", show(path)),
+            Self::ParentNotDir { target, parent } => format!(
                 "cannot link {} because {} is not a directory",
-                target.display(),
-                parent.display()
+                show(target),
+                show(parent)
             ),
             Self::PackageElsewhere { package, config } => {
-                write!(f, "package {package} is owned by {}", config.display())
+                format!("package {package} is owned by {}", show(config))
             }
         }
     }
@@ -126,8 +121,8 @@ pub fn plan(
             }
             Some(record) => planner.plan.notes.push(format!(
                 "package {name} moved from {} to {}",
-                record.config.display(),
-                config.display()
+                display(&record.config, home),
+                display(config, home)
             )),
             None => {}
         }
