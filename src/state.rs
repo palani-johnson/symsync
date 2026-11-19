@@ -74,9 +74,13 @@ impl State {
         &self.dir
     }
 
+    pub fn links_dir(&self) -> PathBuf {
+        self.dir.join(LINKS_DIR)
+    }
+
     /// Path of the state link for a target.
     pub fn link_path(&self, target: &Path) -> PathBuf {
-        self.dir.join(LINKS_DIR).join(state_link_name(target))
+        self.links_dir().join(state_link_name(target))
     }
 
     /// Writes the packages file atomically.

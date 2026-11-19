@@ -168,7 +168,7 @@ Sync does these steps for the packages in one config:
 3. Find the packages in the state whose recorded config is this config but which the config no longer defines. These packages were removed, so sync removes all their links.
 4. For each package, compare the targets in the config with the targets in the state:
    - **New target:** create the state link, create the parent directories of the target, and create the target link.
-   - **Removed target:** remove the target link (only if it still points to the expected state link), then remove the state link.
+   - **Removed target:** remove the target link (only if it still points to the expected state link), then remove the state link. If the target is no longer a symsync link, sync leaves it in place and shows a note.
    - **Changed source:** rewrite the state link only.
    - **Unchanged target:** check the health of both links. Rewrite the state link if the repo moved.
 5. Write `packages.toml` and release the lock.
