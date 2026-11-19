@@ -4,18 +4,22 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 
 use crate::config::LoadedConfig;
-use crate::paths::{normalize, resolve};
+use crate::paths::{display, normalize, resolve};
 
 /// Source of each target, keyed by target. All paths are absolute.
 pub type Targets = BTreeMap<PathBuf, PathBuf>;
 
+/// The targets that each package wants.
+#[derive(Debug, Default)]
+pub struct Expansion {
+    pub packages: BTreeMap<String, Targets>,
+    /// Problems that do not stop sync, such as a glob that matches no files.
+    pub warnings: Vec<String>,
+}
+
 /// Expands the globs of every package in the config into the targets the package wants. The config file and files that belong to the state directory at `state_dir` are never sources.
-pub fn expand(
-    loaded: &LoadedConfig,
-    home: &Path,
-    state_dir: &Path,
-) -> Result<BTreeMap<String, Targets>> {
-    let mut packages = BTreeMap::new();
+pub fn expand(loaded: &LoadedConfig, home: &Path, state_dir: &Path) -> Result<Expansion> {
+    let mut expansion = Expansion::default();
     let mut owners: BTreeMap<PathBuf, (String, PathBuf)> = BTreeMap::new();
 
     for (name, package) in &loaded.config.packages {
@@ -29,10 +33,12 @@ pub fn expand(
             let target_dir = resolve(&group.target, loaded.dir(), home)?;
 
             for source in &group.sources {
+                let mut matched = false;
                 for path in matches(&root, source, group.hidden)? {
                     if path == loaded.path || belongs_to_state(&path, state_dir) {
                         continue;
                     }
+                    matched = true;
                     let rel = path.strip_prefix(&root).with_context(|| {
                         format!("{} is outside of root {}", path.display(), root.display())
                     })?;
@@ -51,13 +57,19 @@ pub fn expand(
                     owners.insert(target.clone(), (name.clone(), path.clone()));
                     targets.insert(target, path);
                 }
+                if !matched {
+                    expansion.warnings.push(format!(
+                        "package {name}: glob {source} in {} matched no files",
+                        display(&root, home)
+                    ));
+                }
             }
         }
 
-        packages.insert(name.clone(), targets);
+        expansion.packages.insert(name.clone(), targets);
     }
 
-    Ok(packages)
+    Ok(expansion)
 }
 
 /// Whether `path` is in the state directory, or is a link into it. Without this check, a target directory inside a root feeds its own links back in as sources.
@@ -114,7 +126,7 @@ mod tests {
 
     impl Fixture {
         fn expand(&self, loaded: &LoadedConfig) -> Result<BTreeMap<String, Targets>> {
-            expand(loaded, &self.home, &self.state)
+            expand(loaded, &self.home, &self.state).map(|e| e.packages)
         }
     }
 
@@ -296,6 +308,24 @@ mod tests {
         assert_eq!(
             f.expand(&loaded).unwrap()["p"],
             Targets::from([(f.repo.join("out/a.txt"), f.repo.join("a.txt"))])
+        );
+    }
+
+    #[test]
+    fn warns_about_globs_without_matches() {
+        let f = fixture(&["a.txt"]);
+        let loaded = config(
+            &f,
+            vec![("p", vec![group(None, &["*.txt", "*.md"], "out")])],
+        );
+
+        let expansion = expand(&loaded, &f.home, &f.state).unwrap();
+        assert_eq!(expansion.packages["p"].len(), 1);
+        assert_eq!(expansion.warnings.len(), 1);
+        assert!(
+            expansion.warnings[0].contains("*.md"),
+            "{:?}",
+            expansion.warnings
         );
     }
 }

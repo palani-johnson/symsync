@@ -91,6 +91,7 @@ struct Context {
     state_dir: PathBuf,
     link_type: LinkType,
     desired: std::collections::BTreeMap<String, Targets>,
+    warnings: Vec<String>,
 }
 
 impl Context {
@@ -99,15 +100,22 @@ impl Context {
         let loaded = LoadedConfig::load(cli.config.as_deref(), &env.cwd)?;
         let state_dir = settings::state_dir(cli.state_dir.as_deref(), &env, Some(&loaded));
         let link_type = settings::link_type(&env, Some(&loaded))?;
-        let desired = desired::expand(&loaded, &env.home, &state_dir)?;
+        let expansion = desired::expand(&loaded, &env.home, &state_dir)?;
 
         Ok(Self {
             env,
             loaded,
             state_dir,
             link_type,
-            desired,
+            desired: expansion.packages,
+            warnings: expansion.warnings,
         })
+    }
+
+    fn print_warnings(&self) {
+        for warning in &self.warnings {
+            println!("warning: {warning}");
+        }
     }
 
     fn plan(&self, state: &State) -> plan::Plan {
@@ -146,6 +154,7 @@ fn cmd_plan(cli: &Cli) -> Result<()> {
     let ctx = Context::load(cli)?;
     let state = State::read(&ctx.state_dir)?;
     let plan = ctx.plan(&state);
+    ctx.print_warnings();
 
     for message in plan.steps.iter().filter_map(|s| s.message.as_deref()) {
         println!("{message}");
@@ -165,6 +174,7 @@ fn cmd_sync(cli: &Cli) -> Result<()> {
     let ctx = Context::load(cli)?;
     let mut state = State::open(&ctx.state_dir)?;
     let plan = ctx.plan(&state);
+    ctx.print_warnings();
 
     if !plan.conflicts.is_empty() {
         print_findings(&plan, &ctx.env.home);
