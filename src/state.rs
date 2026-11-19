@@ -42,14 +42,22 @@ impl State {
         }
         check_layout(dir)?;
 
-        let lock = open_lock(dir)?;
-        lock.lock_shared()
-            .with_context(|| format!("failed to lock {}", dir.display()))?;
+        // Without a lock file, no writer has run yet, and a read must not create one.
+        let lock_path = dir.join(LOCK_FILE);
+        let lock = if lock_path.exists() {
+            let lock = File::open(&lock_path)
+                .with_context(|| format!("failed to open {}", lock_path.display()))?;
+            lock.lock_shared()
+                .with_context(|| format!("failed to lock {}", dir.display()))?;
+            Some(lock)
+        } else {
+            None
+        };
 
         Ok(Self {
             dir: dir.to_path_buf(),
             packages: read_packages(dir)?,
-            _lock: Some(lock),
+            _lock: lock,
         })
     }
 
@@ -256,6 +264,13 @@ mod tests {
         let state = State::read(&dir).unwrap();
         assert!(state.packages.is_empty());
         assert!(!dir.exists());
+    }
+
+    #[test]
+    fn read_does_not_create_lock_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        State::read(tmp.path()).unwrap();
+        assert!(!tmp.path().join(LOCK_FILE).exists());
     }
 
     #[test]

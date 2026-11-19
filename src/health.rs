@@ -10,6 +10,7 @@ pub enum Health {
     Ok,
     MissingLink,
     Drifted,
+    Exists,
     ForeignLink,
     MissingStateLink,
     WrongStateLink,
@@ -22,6 +23,7 @@ impl fmt::Display for Health {
             Self::Ok => "ok",
             Self::MissingLink => "missing link",
             Self::Drifted => "drifted",
+            Self::Exists => "exists",
             Self::ForeignLink => "foreign link",
             Self::MissingStateLink => "missing state link",
             Self::WrongStateLink => "wrong state link",
@@ -36,7 +38,8 @@ pub fn check(state: &State, target: &Path, source: &Path) -> Health {
 
     match std::fs::symlink_metadata(target) {
         Err(_) => return Health::MissingLink,
-        Ok(meta) if !meta.file_type().is_symlink() => return Health::Drifted,
+        Ok(meta) if meta.is_file() => return Health::Drifted,
+        Ok(meta) if !meta.file_type().is_symlink() => return Health::Exists,
         Ok(_) => {}
     }
     match std::fs::read_link(target) {
@@ -139,5 +142,13 @@ mod tests {
         let f = linked();
         std::fs::remove_file(&f.source).unwrap();
         assert_eq!(f.check(), Health::MissingSource);
+    }
+
+    #[test]
+    fn directory_at_target_is_not_drift() {
+        let f = linked();
+        std::fs::remove_file(&f.target).unwrap();
+        std::fs::create_dir(&f.target).unwrap();
+        assert_eq!(f.check(), Health::Exists);
     }
 }
