@@ -9,7 +9,7 @@ use crate::paths::{normalize, resolve};
 /// Source of each target, keyed by target. All paths are absolute.
 pub type Targets = BTreeMap<PathBuf, PathBuf>;
 
-/// Expands the globs of every package in the config into the targets the package wants. Files that belong to the state directory at `state_dir` are never sources.
+/// Expands the globs of every package in the config into the targets the package wants. The config file and files that belong to the state directory at `state_dir` are never sources.
 pub fn expand(
     loaded: &LoadedConfig,
     home: &Path,
@@ -30,7 +30,7 @@ pub fn expand(
 
             for source in &group.sources {
                 for path in matches(&root, source, group.hidden)? {
-                    if belongs_to_state(&path, state_dir) {
+                    if path == loaded.path || belongs_to_state(&path, state_dir) {
                         continue;
                     }
                     let rel = path.strip_prefix(&root).with_context(|| {
@@ -281,6 +281,17 @@ mod tests {
         let mut all = group(None, &["**/*"], "out");
         all.hidden = true;
         let loaded = config(&f, vec![("p", vec![all])]);
+
+        assert_eq!(
+            f.expand(&loaded).unwrap()["p"],
+            Targets::from([(f.repo.join("out/a.txt"), f.repo.join("a.txt"))])
+        );
+    }
+
+    #[test]
+    fn skips_config_file() {
+        let f = fixture(&["symsync.toml", "a.txt"]);
+        let loaded = config(&f, vec![("p", vec![group(None, &["*"], "out")])]);
 
         assert_eq!(
             f.expand(&loaded).unwrap()["p"],
