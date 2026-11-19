@@ -6,6 +6,23 @@ Each target links to a state link in a machine-local state directory, and the st
 
 See the [design document](docs/design.md) for the full design.
 
+## How it works
+
+Every managed file is a chain of two links:
+
+```
+~/.config/zed/settings.json  →  ~/.local/state/symsync/links/<sha256>  →  ~/dotfiles/zed/settings.json
+       target link                        state link                             source
+```
+
+The target link never changes after symsync creates it. When a repo moves or a source changes, symsync rewrites only the state link. Any link that resolves through the `links/` directory of a state directory is managed by symsync.
+
+The state directory also holds `packages.toml`, the record of which package owns which targets. With this record, symsync removes only links that it created, and it can remove a package even after its repo is gone. Symsync finds the state directory in this order: the `--state-dir` flag, `$SYMSYNC_STATE_DIR`, `state_dir` in the config, `$XDG_STATE_HOME/symsync`, and `~/.local/state/symsync`.
+
+A package is a named group of links in a repo config, and package names are unique in a state directory. One machine can use packages from many repos, and if two repos define the same package name, sync stops with a conflict.
+
+By default, all links and recorded paths are absolute. With `link_type = "relative"` in the config (or `$SYMSYNC_LINK_TYPE`), they are all relative. Together with a `state_dir` inside the repo, this makes a self-contained chain that you can commit and that works after a clone to any location. The [basic example](examples/basic) uses this mode.
+
 ## Configuration
 
 Put a `symsync.toml` file at the root of your dotfiles repo (json, json5, jsonc, and yaml are also supported). Each package has one or more link groups. A link group selects files in `root` with globs, and links each file to the same relative path in `target`.
@@ -23,6 +40,13 @@ target = "~/.config/zed"
 ```
 
 Wildcards do not match names that start with `.`, so `**/*` does not go into `.git/`. A literal `.` in a glob matches them, as in `.*` above. To let wildcards match hidden files too, set `hidden = true` on the link group.
+
+The config file, the state directory, and links that symsync manages are never sources. When a glob matches no files, `plan` and `sync` show a warning, because a typo or a renamed `root` otherwise unlinks the whole package:
+
+```
+$ symsync plan
+warning: package zed: glob **/*.json in ~/dotfiles/zedd matched no files
+```
 
 ## Usage
 
@@ -95,6 +119,7 @@ When a source or a package is no longer in the config, `sync` removes its links.
 ```
 $ symsync sync
 unlink  ~/.config/zed/themes/dark.json
+note: ~/.config/zed/themes has no entries left, symsync does not remove directories
 
 $ symsync sync
 note: package zed was removed from the config
@@ -129,6 +154,33 @@ $ symsync remove zsh
 unlink  ~/.zshenv
 unlink  ~/.zshrc
 removed package zsh
+```
+
+### Selected packages
+
+`plan` and `sync` accept `--package` (or `-p`), one or more times. Symsync then plans only the named packages and leaves all others alone.
+
+```
+$ symsync sync --package zsh
+link    ~/.zshenv -> ~/dotfiles/zsh/.zshenv
+link    ~/.zshrc -> ~/dotfiles/zsh/.zshrc
+```
+
+### Stray state links
+
+A state link that no package records is stray, for example after manual changes to the state directory. `status` lists stray state links, and `prune` removes them.
+
+```
+$ symsync status
+state: ~/.local/state/symsync
+zsh (~/dotfiles/symsync.toml)
+  ok                 ~/.zshenv
+  ok                 ~/.zshrc
+stray state links, run `symsync prune` to remove them
+  ~/.local/state/symsync/links/3f2a9c…
+
+$ symsync prune
+remove  ~/.local/state/symsync/links/3f2a9c…
 ```
 
 ### Config and schema

@@ -20,7 +20,7 @@ This document describes the design of symsync.
 ## Concepts
 
 - **Repo:** a directory with a `symsync.toml` config file. A machine can have many repos.
-- **Package:** a named group of links, defined in a repo config. The package is the unit of ownership. Package names are unique on the machine.
+- **Package:** a named group of links, defined in a repo config. The package is the unit of ownership. Package names are unique in a state directory.
 - **Source:** a file in a repo.
 - **Target:** the path where the user expects the file, for example `~/.config/zed/settings.json`.
 - **Target link:** the symlink at the target. It points to a state link.
@@ -72,7 +72,7 @@ Layout:
 ```
 <state dir>/
   links/
-    <sha256 of target path>   → absolute path of source
+    <sha256 of target path>   → source
   packages.toml
   lock
 ```
@@ -150,17 +150,28 @@ Each link group has these fields:
 
 Globs select only files. Symsync does not link directories. A target always has the same name as its source, relative to `root`. There is no syntax to map one source to a target with a different name.
 
+Some files are never sources, even when a glob matches them:
+
+- The config file.
+- Files in the state directory.
+- Links into the state directory. These are targets that symsync manages. Without this rule, a target directory inside a `root` feeds its own links back in as new sources.
+
+When a glob matches no files, `plan` and `sync` show a warning. A typo in a glob or a renamed `root` otherwise makes sync unlink the whole package without notice.
+
 ## Commands
 
 - `symsync plan`: shows the changes that `sync` would make. It does not change anything.
 - `symsync sync`: applies the plan for all packages in the current config.
-- `symsync status`: shows every package on the machine, its config, its targets, and the health of each target.
+- `symsync status`: shows every package in the state directory, its config, its targets, the health of each target (see [Health checks](#health-checks)), and stray state links.
 - `symsync remove <package>`: removes a package and all its links, with only the state as input. The config does not need to exist.
+- `symsync prune`: removes stray state links (see [Stray state links](#stray-state-links)).
 - `symsync adopt <target>`: recovers a target that an app replaced with a regular file (see [Drift](#drift)).
 - `symsync config`: prints the parsed config.
 - `symsync gen-config-schema`: prints the JSON schema of the config.
 
 Commands that read a config find `symsync.toml` in the current directory, or use the path given with `--config`. All commands accept `--state-dir`.
+
+`plan` and `sync` accept `--package <name>` (or `-p`), one or more times. With it, symsync plans only the named packages and leaves all other packages alone, even packages that the config no longer defines.
 
 ## Sync
 
@@ -174,7 +185,11 @@ Sync does these steps for the packages in one config:
    - **Removed target:** remove the target link (only if it still points to the expected state link), then remove the state link. If the target is no longer a symsync link, sync leaves it in place and shows a note.
    - **Changed source:** rewrite the state link only.
    - **Unchanged target:** check the health of both links. Rewrite the state link if the repo moved.
-5. Write `packages.toml` and release the lock.
+5. Before any change, write each changed package to `packages.toml` with the union of its old and new targets. Then apply the changes, write the final records, and release the lock.
+
+Because of step 5, every link that can be on disk is recorded, even when a change fails or the process stops. The next sync then removes any extra links with the usual safety rule.
+
+When the last entry in a directory is unlinked, sync shows a note. Symsync does not remove directories.
 
 Sync never removes or overwrites a regular file or a link that symsync does not own. These cases are conflicts. `plan` shows them, and `sync` stops before any change.
 
@@ -211,12 +226,19 @@ Symsync never adopts a file automatically.
 
 ## Health checks
 
-`status` and `plan` report these problems for each target:
+`status` shows one of these for each target:
 
-- **Missing target link:** symsync recreates it on sync.
-- **Drifted:** the target is a regular file (see [Drift](#drift)).
-- **Foreign link:** the target is a link that does not point to the expected state link. This is a conflict.
-- **Broken state link:** the source does not exist. If the source came from a glob, sync removes the target. If not, sync reports an error.
+- **ok:** the full chain from target to source is correct.
+- **missing link:** there is nothing at the target. Sync creates the link again.
+- **drifted:** the target is a regular file (see [Drift](#drift)). Sync reports a conflict.
+- **foreign link:** the target is a link that does not point to its state link. Sync reports a conflict.
+- **missing state link:** the state link does not exist. Sync creates it again.
+- **wrong state link:** the state link does not point to the recorded source. Sync rewrites it.
+- **missing source:** the source file does not exist. Its glob no longer matches it, so sync unlinks the target.
+
+## Stray state links
+
+A stray state link is an entry in `links/` that no package records, for example after manual changes to the state directory. `status` lists stray state links, and `symsync prune` removes them. Prune removes only symlinks, and leaves other files in place with a note.
 
 ## Testing
 
@@ -224,5 +246,5 @@ Integration tests run the binary in a temp directory with `$SYMSYNC_STATE_DIR` a
 
 ## Future work
 
-- **Machine-specific package selection:** a machine-local file that selects which packages are active on the machine.
+- **Machine-specific package selection:** a machine-local file that selects which packages are active on the machine. The `--package` filter is a first step.
 - **Directory links:** link a whole directory to capture files that an app creates. Files stay the default. The planner must then stop file links from going inside a linked directory.
