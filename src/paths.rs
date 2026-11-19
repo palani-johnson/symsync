@@ -45,6 +45,25 @@ pub fn normalize(path: &Path) -> PathBuf {
     out
 }
 
+/// Resolves symlinks in the longest part of a normalized absolute path that exists. The rest of the path is kept as it is.
+pub fn canonicalize_existing(path: &Path) -> PathBuf {
+    let mut missing = Vec::new();
+    let mut current = path;
+    loop {
+        if let Ok(mut real) = std::fs::canonicalize(current) {
+            real.extend(missing.iter().rev());
+            return real;
+        }
+        match (current.parent(), current.file_name()) {
+            (Some(parent), Some(name)) => {
+                missing.push(name.to_owned());
+                current = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
+}
+
 /// File name of the state link for a normalized absolute target path.
 pub fn state_link_name(target: &Path) -> String {
     Sha256::digest(OsStr::as_bytes(target.as_os_str()))
@@ -152,5 +171,18 @@ mod tests {
         assert_eq!(display(Path::new("/home/user/.zshrc"), home), "~/.zshrc");
         assert_eq!(display(Path::new("/home/user"), home), "~");
         assert_eq!(display(Path::new("/etc/hosts"), home), "/etc/hosts");
+    }
+
+    #[test]
+    fn canonicalizes_existing_part_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().canonicalize().unwrap();
+        std::fs::create_dir(real.join("dir")).unwrap();
+        std::os::unix::fs::symlink("dir", real.join("alias")).unwrap();
+
+        assert_eq!(
+            canonicalize_existing(&real.join("alias/new/state")),
+            real.join("dir/new/state")
+        );
     }
 }

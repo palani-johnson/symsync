@@ -83,8 +83,9 @@ impl LoadedConfig {
             Some(path) => path.to_path_buf(),
             None => find(dir)?,
         };
-        let path = std::path::absolute(&path)
-            .with_context(|| format!("failed to resolve {}", path.display()))?;
+        // Canonical, so that one config has one identity in the state however it is reached.
+        let path = std::fs::canonicalize(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
         let content = std::fs::read_to_string(&path)
             .with_context(|| format!("failed to read {}", path.display()))?;
         let config = parse(&content, &path)?;
@@ -235,8 +236,27 @@ packages:
         std::fs::write(dir.path().join("symsync.toml"), TOML).unwrap();
 
         let loaded = LoadedConfig::load(None, dir.path()).unwrap();
-        assert_eq!(loaded.path, dir.path().join("symsync.toml"));
-        assert_eq!(loaded.dir(), dir.path());
+        let real = dir.path().canonicalize().unwrap();
+        assert_eq!(loaded.path, real.join("symsync.toml"));
+        assert_eq!(loaded.dir(), real);
+    }
+
+    #[test]
+    fn same_config_has_one_path() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("repo")).unwrap();
+        std::fs::write(dir.path().join("repo/symsync.toml"), TOML).unwrap();
+        std::os::unix::fs::symlink("repo", dir.path().join("alias")).unwrap();
+
+        let direct = LoadedConfig::load(None, &dir.path().join("repo")).unwrap();
+        let dotted = LoadedConfig::load(
+            Some(&dir.path().join("alias/../repo/symsync.toml")),
+            dir.path(),
+        )
+        .unwrap();
+        let aliased = LoadedConfig::load(None, &dir.path().join("alias")).unwrap();
+        assert_eq!(direct.path, dotted.path);
+        assert_eq!(direct.path, aliased.path);
     }
 
     #[test]

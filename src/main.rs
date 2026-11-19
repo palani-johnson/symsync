@@ -113,7 +113,11 @@ impl Context {
     fn load(cli: &Cli, packages: &[String]) -> Result<Self> {
         let env = Env::from_process()?;
         let loaded = LoadedConfig::load(cli.config.as_deref(), &env.cwd)?;
-        let state_dir = settings::state_dir(cli.state_dir.as_deref(), &env, Some(&loaded));
+        let state_dir = paths::canonicalize_existing(&settings::state_dir(
+            cli.state_dir.as_deref(),
+            &env,
+            Some(&loaded),
+        ));
         let link_type = settings::link_type(&env, Some(&loaded))?;
         let mut expansion = desired::expand(&loaded, &env.home, &state_dir)?;
 
@@ -235,11 +239,11 @@ fn cmd_sync(cli: &Cli, packages: &[String]) -> Result<()> {
 /// The state directory for commands that do not need a config. A config is used only if one is given or found.
 fn optional_state_dir(cli: &Cli, env: &Env) -> Result<PathBuf> {
     let loaded = LoadedConfig::load_optional(cli.config.as_deref(), &env.cwd)?;
-    Ok(settings::state_dir(
+    Ok(paths::canonicalize_existing(&settings::state_dir(
         cli.state_dir.as_deref(),
         env,
         loaded.as_ref(),
-    ))
+    )))
 }
 
 fn cmd_status(cli: &Cli) -> Result<()> {

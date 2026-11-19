@@ -307,3 +307,23 @@ fn stray_state_links_are_reported_and_pruned() {
     let out = stdout(&s.run("repo", &["prune"]).success());
     assert!(out.contains("nothing to prune"), "{out}");
 }
+
+#[test]
+fn state_dir_reached_through_a_symlink_is_the_same_state() {
+    let s = sandbox();
+    s.zsh_repo("repo");
+    s.run("repo", &["sync"]).success();
+    std::os::unix::fs::symlink(&s.root, s.path("alias")).unwrap();
+
+    let aliased = s.path("alias/state");
+    let assert = s
+        .run("repo", &["sync", "--state-dir", aliased.to_str().unwrap()])
+        .success();
+    assert!(
+        stdout(&assert).contains("already in sync"),
+        "{}",
+        stdout(&assert)
+    );
+    let out = stdout(&s.run("repo", &["status"]).success());
+    assert!(!out.contains("stray"), "{out}");
+}
