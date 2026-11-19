@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config::LinkType;
 use crate::desired::Targets;
-use crate::paths::normalize;
+use crate::paths::{display, relative, resolves_to};
 use crate::state::{PackageRecord, State};
 
 /// A single change to the file system.
@@ -170,6 +170,26 @@ pub fn plan(
     planner.plan
 }
 
+/// Plans the removal of a package and all its links, with the state as the only input.
+pub fn plan_remove(state: &State, name: &str, record: &PackageRecord, home: &Path) -> Plan {
+    let mut planner = Planner {
+        state,
+        config: &record.config,
+        link_type: record.link_type,
+        home,
+        plan: Plan::default(),
+        removed: HashSet::new(),
+        created_dirs: HashSet::new(),
+    };
+
+    for target in record.targets.keys() {
+        planner.unlink(target);
+    }
+    planner.plan.records.insert(name.to_string(), None);
+
+    planner.plan
+}
+
 struct Planner<'a> {
     state: &'a State,
     config: &'a Path,
@@ -205,10 +225,7 @@ impl Planner<'_> {
     }
 
     fn show(&self, path: &Path) -> String {
-        match path.strip_prefix(self.home) {
-            Ok(rest) => format!("~/{}", rest.display()),
-            Err(_) => path.display().to_string(),
-        }
+        display(path, self.home)
     }
 
     fn push(&mut self, message: Option<String>, action: Action) {
@@ -357,16 +374,6 @@ impl Planner<'_> {
     fn conflict(&mut self, conflict: Conflict) {
         self.plan.conflicts.push(conflict);
     }
-}
-
-/// Whether the symlink at `at`, with the content `value`, points to `expected`.
-fn resolves_to(value: &Path, at: &Path, expected: &Path) -> bool {
-    let base = at.parent().unwrap_or(Path::new("/"));
-    normalize(&base.join(value)) == expected
-}
-
-fn relative(path: &Path, from: &Path) -> PathBuf {
-    pathdiff::diff_paths(path, from).unwrap_or_else(|| path.to_path_buf())
 }
 
 #[cfg(test)]
@@ -791,5 +798,26 @@ mod tests {
         let plan = f.plan(LinkType::Absolute, &f.desired(&[]));
         assert!(plan.steps.is_empty());
         assert!(!plan.records.contains_key("q"));
+    }
+
+    #[test]
+    fn remove_unlinks_package_without_config() {
+        let mut f = fixture();
+        let plan = f.plan(
+            LinkType::Absolute,
+            &f.desired(&[("p", &[("home/a", "repo/a")])]),
+        );
+        f.apply(plan);
+        let link = f.state.link_path(&f.path("home/a"));
+
+        let record = f.state.packages["p"].clone();
+        let plan = plan_remove(&f.state, "p", &record, &f.home);
+        assert_eq!(messages(&plan), ["unlink  ~/a"]);
+
+        f.apply(plan);
+        assert!(!f.path("home/a").is_symlink());
+        assert!(!link.is_symlink());
+        assert!(f.state.packages.is_empty());
+        assert!(f.path("repo/a").is_file());
     }
 }

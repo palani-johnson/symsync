@@ -1,6 +1,7 @@
 mod config;
 mod desired;
 mod execute;
+mod health;
 mod paths;
 mod plan;
 mod settings;
@@ -68,9 +69,9 @@ fn main() -> Result<()> {
     match &cli.command {
         Command::Plan => cmd_plan(&cli),
         Command::Sync => cmd_sync(&cli),
-        Command::Status | Command::Remove { .. } | Command::Adopt { .. } => {
-            bail!("not implemented")
-        }
+        Command::Status => cmd_status(&cli),
+        Command::Remove { package } => cmd_remove(&cli, package),
+        Command::Adopt { .. } => bail!("not implemented"),
         Command::Config => {
             let loaded = LoadedConfig::load(cli.config.as_deref(), &std::env::current_dir()?)?;
             println!("{}", serde_json::to_string_pretty(&loaded.config)?);
@@ -181,4 +182,77 @@ fn cmd_sync(cli: &Cli) -> Result<()> {
 
     execute::update_records(&mut state, plan.records);
     state.save()
+}
+
+/// The state directory for commands that do not need a config. A config is used only if one is given or found.
+fn optional_state_dir(cli: &Cli, env: &Env) -> Result<PathBuf> {
+    let loaded = LoadedConfig::load_optional(cli.config.as_deref(), &env.cwd)?;
+    Ok(settings::state_dir(
+        cli.state_dir.as_deref(),
+        env,
+        loaded.as_ref(),
+    ))
+}
+
+fn cmd_status(cli: &Cli) -> Result<()> {
+    let env = Env::from_process()?;
+    let state_dir = optional_state_dir(cli, &env)?;
+    let state = State::read(&state_dir)?;
+    let show = |path: &std::path::Path| paths::display(path, &env.home);
+
+    println!("state: {}", show(&state_dir));
+    if state.packages.is_empty() {
+        println!("no packages");
+        return Ok(());
+    }
+
+    for (name, record) in &state.packages {
+        let orphaned = if still_defines(&record.config, name) {
+            ""
+        } else {
+            "orphaned, "
+        };
+        println!("{name} ({orphaned}{})", show(&record.config));
+        for (target, source) in &record.targets {
+            let health = health::check(&state, target, source);
+            println!("  {:<18} {}", health.to_string(), show(target));
+        }
+    }
+    Ok(())
+}
+
+fn cmd_remove(cli: &Cli, package: &str) -> Result<()> {
+    let env = Env::from_process()?;
+    let state_dir = optional_state_dir(cli, &env)?;
+    if !state_dir.exists() {
+        bail!("no package {package} in {}", state_dir.display());
+    }
+
+    let mut state = State::open(&state_dir)?;
+    let Some(record) = state.packages.get(package).cloned() else {
+        bail!("no package {package} in {}", state_dir.display());
+    };
+    let plan = plan::plan_remove(&state, package, &record, &env.home);
+
+    if !plan.conflicts.is_empty() {
+        print_findings(&plan);
+        bail!(
+            "remove stopped by {} conflict(s), nothing was changed",
+            plan.conflicts.len()
+        );
+    }
+
+    execute::run_steps(&plan.steps, |message| println!("{message}"))?;
+    print_findings(&plan);
+    execute::update_records(&mut state, plan.records);
+    state.save()?;
+
+    println!("removed package {package}");
+    if record.config.exists() && still_defines(&record.config, package) {
+        println!(
+            "note: {} still defines {package}, the next sync from it adds the package again",
+            paths::display(&record.config, &env.home)
+        );
+    }
+    Ok(())
 }

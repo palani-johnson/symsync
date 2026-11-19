@@ -88,6 +88,14 @@ impl LoadedConfig {
         Ok(Self { path, config })
     }
 
+    /// Like [`Self::load`], but gives `None` when `path` is `None` and `dir` has no config file.
+    pub fn load_optional(path: Option<&Path>, dir: &Path) -> Result<Option<Self>> {
+        if path.is_none() && !FILE_NAMES.iter().any(|name| dir.join(name).is_file()) {
+            return Ok(None);
+        }
+        Self::load(path, dir).map(Some)
+    }
+
     /// Directory that holds the config file.
     pub fn dir(&self) -> &Path {
         self.path

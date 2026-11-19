@@ -70,10 +70,6 @@ impl State {
         })
     }
 
-    pub fn dir(&self) -> &Path {
-        &self.dir
-    }
-
     pub fn links_dir(&self) -> PathBuf {
         self.dir.join(LINKS_DIR)
     }

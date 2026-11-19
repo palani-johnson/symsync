@@ -53,6 +53,26 @@ pub fn state_link_name(target: &Path) -> String {
         .collect()
 }
 
+/// Whether the symlink at `at`, with the content `value`, points to `expected`.
+pub fn resolves_to(value: &Path, at: &Path, expected: &Path) -> bool {
+    let base = at.parent().unwrap_or(Path::new("/"));
+    normalize(&base.join(value)) == expected
+}
+
+/// `path` relative to the directory `from`.
+pub fn relative(path: &Path, from: &Path) -> PathBuf {
+    pathdiff::diff_paths(path, from).unwrap_or_else(|| path.to_path_buf())
+}
+
+/// `path` for output, with `~` for the home directory.
+pub fn display(path: &Path, home: &Path) -> String {
+    match path.strip_prefix(home) {
+        Ok(rest) if rest.as_os_str().is_empty() => "~".to_string(),
+        Ok(rest) => format!("~/{}", rest.display()),
+        Err(_) => path.display().to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -108,5 +128,29 @@ mod tests {
             state_link_name(Path::new("abc")),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
+    }
+
+    #[test]
+    fn resolves_absolute_and_relative_values() {
+        let expected = Path::new("/state/links/x");
+        assert!(resolves_to(expected, Path::new("/home/a"), expected));
+        assert!(resolves_to(
+            Path::new("../state/links/x"),
+            Path::new("/home/a"),
+            expected
+        ));
+        assert!(!resolves_to(
+            Path::new("state/links/x"),
+            Path::new("/home/a"),
+            expected
+        ));
+    }
+
+    #[test]
+    fn displays_home_as_tilde() {
+        let home = Path::new(HOME);
+        assert_eq!(display(Path::new("/home/user/.zshrc"), home), "~/.zshrc");
+        assert_eq!(display(Path::new("/home/user"), home), "~");
+        assert_eq!(display(Path::new("/etc/hosts"), home), "/etc/hosts");
     }
 }
