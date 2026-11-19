@@ -79,7 +79,9 @@ Layout:
 
 ### State link names
 
-The name of a state link is the SHA-256 hex digest of the normalized target path. To normalize a path, symsync expands `~`, makes the path absolute, and cleans it lexically (it removes `.`, `..` and duplicate separators). Symsync does not resolve symlinks during normalization. Without normalization, `~/.zshrc` and `/Users/uzz/.zshrc` get different names and the one-owner rule fails.
+The name of a state link is the SHA-256 hex digest of the normalized target path, relative to the state directory. To normalize a path, symsync expands `~`, makes the path absolute, and cleans it lexically (it removes `.`, `..` and duplicate separators). Symsync does not resolve symlinks during normalization. Without normalization, `~/.zshrc` and `/Users/uzz/.zshrc` get different names and the one-owner rule fails.
+
+The path is relative to the state directory so that the name stays the same when a repo and its state directory move together, as in relative mode. In absolute mode, the targets and the state directory do not move, so the names also stay the same.
 
 Because the name comes from the target, each target has at most one state link, and the file system enforces one owner per target.
 

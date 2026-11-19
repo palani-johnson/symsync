@@ -244,15 +244,20 @@ target = "out"
     );
     s.write("repo/in/a.txt", "a");
 
-    cargo_bin_cmd!("symsync")
-        .current_dir(s.path("repo"))
-        .env("HOME", &s.home)
-        .env_remove("SYMSYNC_STATE_DIR")
-        .env_remove("SYMSYNC_LINK_TYPE")
-        .env_remove("XDG_STATE_HOME")
-        .arg("sync")
-        .assert()
-        .success();
+    let sync = |dir: &str| {
+        let assert = cargo_bin_cmd!("symsync")
+            .current_dir(s.path(dir))
+            .env("HOME", &s.home)
+            .env_remove("SYMSYNC_STATE_DIR")
+            .env_remove("SYMSYNC_LINK_TYPE")
+            .env_remove("XDG_STATE_HOME")
+            .arg("sync")
+            .assert()
+            .success();
+        stdout(&assert)
+    };
+
+    sync("repo");
     assert_eq!(s.read("repo/out/a.txt"), "a");
 
     std::fs::rename(s.path("repo"), s.path("copy")).unwrap();
@@ -260,4 +265,7 @@ target = "out"
 
     let packages = s.read("copy/.symsync.state/packages.toml");
     assert!(!packages.contains(s.root.to_str().unwrap()), "{packages}");
+
+    let out = sync("copy");
+    assert!(out.contains("already in sync"), "{out}");
 }

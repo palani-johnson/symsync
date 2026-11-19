@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::config::LinkType;
-use crate::paths::{normalize, state_link_name};
+use crate::paths::{normalize, relative, state_link_name};
 
 const VERSION: u32 = 1;
 const PACKAGES_FILE: &str = "packages.toml";
@@ -75,8 +75,11 @@ impl State {
     }
 
     /// Path of the state link for a target.
+    ///
+    /// The name comes from the target path relative to the state directory, so it stays the same when a relative repo and its state directory move together.
     pub fn link_path(&self, target: &Path) -> PathBuf {
-        self.links_dir().join(state_link_name(target))
+        self.links_dir()
+            .join(state_link_name(&relative(target, &self.dir)))
     }
 
     /// Writes the packages file atomically.
@@ -278,14 +281,23 @@ mod tests {
     }
 
     #[test]
-    fn link_path_uses_target_hash() {
-        let tmp = tempfile::tempdir().unwrap();
-        let state = State::read(tmp.path()).unwrap();
-        let target = Path::new("/home/user/.zshrc");
+    fn link_path_hashes_target_relative_to_state_dir() {
+        let state = State::read(Path::new("/state")).unwrap();
 
         assert_eq!(
-            state.link_path(target),
-            tmp.path().join(LINKS_DIR).join(state_link_name(target))
+            state.link_path(Path::new("/home/user/.zshrc")),
+            Path::new("/state/links").join(state_link_name(Path::new("../home/user/.zshrc")))
+        );
+    }
+
+    #[test]
+    fn link_path_is_stable_when_repo_and_state_move_together() {
+        let before = State::read(Path::new("/a/repo/.state")).unwrap();
+        let after = State::read(Path::new("/b/copy/.state")).unwrap();
+
+        assert_eq!(
+            before.link_path(Path::new("/a/repo/out/x")).file_name(),
+            after.link_path(Path::new("/b/copy/out/x")).file_name()
         );
     }
 }
