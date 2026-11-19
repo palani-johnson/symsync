@@ -30,17 +30,21 @@ The examples below use the config above, in a repo at `~/dotfiles`.
 
 ### Plan and sync
 
-`plan` shows the changes without making them. `sync` prints the same lines as it applies them. A later `sync` with nothing to change prints `already in sync`.
+`plan` shows the changes without making them. `sync` prints the same lines as it applies them.
 
 ```
-$ symsync plan
+$ symsync sync
 mkdir   ~/.config/zed
 link    ~/.config/zed/settings.json -> ~/dotfiles/zed/settings.json
 mkdir   ~/.config/zed/themes
 link    ~/.config/zed/themes/dark.json -> ~/dotfiles/zed/themes/dark.json
 link    ~/.zshenv -> ~/dotfiles/zsh/.zshenv
 link    ~/.zshrc -> ~/dotfiles/zsh/.zshrc
+```
 
+A later `sync` with nothing to change prints `already in sync`.
+
+```
 $ symsync sync
 already in sync
 ```

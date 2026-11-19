@@ -9,8 +9,12 @@ use crate::paths::{normalize, resolve};
 /// Source of each target, keyed by target. All paths are absolute.
 pub type Targets = BTreeMap<PathBuf, PathBuf>;
 
-/// Expands the globs of every package in the config into the targets the package wants.
-pub fn expand(loaded: &LoadedConfig, home: &Path) -> Result<BTreeMap<String, Targets>> {
+/// Expands the globs of every package in the config into the targets the package wants. Files that belong to the state directory at `state_dir` are never sources.
+pub fn expand(
+    loaded: &LoadedConfig,
+    home: &Path,
+    state_dir: &Path,
+) -> Result<BTreeMap<String, Targets>> {
     let mut packages = BTreeMap::new();
     let mut owners: BTreeMap<PathBuf, (String, PathBuf)> = BTreeMap::new();
 
@@ -26,6 +30,9 @@ pub fn expand(loaded: &LoadedConfig, home: &Path) -> Result<BTreeMap<String, Tar
 
             for source in &group.sources {
                 for path in matches(&root, source, group.hidden)? {
+                    if belongs_to_state(&path, state_dir) {
+                        continue;
+                    }
                     let rel = path.strip_prefix(&root).with_context(|| {
                         format!("{} is outside of root {}", path.display(), root.display())
                     })?;
@@ -51,6 +58,17 @@ pub fn expand(loaded: &LoadedConfig, home: &Path) -> Result<BTreeMap<String, Tar
     }
 
     Ok(packages)
+}
+
+/// Whether `path` is in the state directory, or is a link into it. Without this check, a target directory inside a root feeds its own links back in as sources.
+fn belongs_to_state(path: &Path, state_dir: &Path) -> bool {
+    if path.starts_with(state_dir) {
+        return true;
+    }
+    std::fs::read_link(path).is_ok_and(|value| {
+        let base = path.parent().unwrap_or(Path::new("/"));
+        normalize(&base.join(value)).starts_with(state_dir)
+    })
 }
 
 /// Files that match `pattern` under `root`, normalized. Unless `hidden` is set, a name that starts with `.` matches only a literal `.` in the pattern.
@@ -91,6 +109,13 @@ mod tests {
         _tmp: tempfile::TempDir,
         repo: PathBuf,
         home: PathBuf,
+        state: PathBuf,
+    }
+
+    impl Fixture {
+        fn expand(&self, loaded: &LoadedConfig) -> Result<BTreeMap<String, Targets>> {
+            expand(loaded, &self.home, &self.state)
+        }
     }
 
     fn fixture(files: &[&str]) -> Fixture {
@@ -104,6 +129,7 @@ mod tests {
         }
         Fixture {
             _tmp: tmp,
+            state: repo.join(".symsync.state"),
             repo,
             home,
         }
@@ -143,7 +169,7 @@ mod tests {
             )],
         );
 
-        let targets = &expand(&loaded, &f.home).unwrap()["zed"];
+        let targets = &f.expand(&loaded).unwrap()["zed"];
         assert_eq!(
             targets,
             &Targets::from([
@@ -165,7 +191,7 @@ mod tests {
         let loaded = config(&f, vec![("p", vec![group(None, &["*.txt"], "out")])]);
 
         assert_eq!(
-            expand(&loaded, &f.home).unwrap()["p"],
+            f.expand(&loaded).unwrap()["p"],
             Targets::from([(f.repo.join("out/a.txt"), f.repo.join("a.txt"))])
         );
     }
@@ -176,7 +202,7 @@ mod tests {
         let loaded = config(&f, vec![("zsh", vec![group(Some("zsh"), &["*"], "~")])]);
 
         assert_eq!(
-            expand(&loaded, &f.home).unwrap()["zsh"],
+            f.expand(&loaded).unwrap()["zsh"],
             Targets::from([(f.home.join("zshrc"), f.repo.join("zsh/zshrc"))])
         );
     }
@@ -187,7 +213,7 @@ mod tests {
         let loaded = config(&f, vec![("p", vec![group(None, &["**/*"], "out")])]);
 
         assert_eq!(
-            expand(&loaded, &f.home).unwrap()["p"],
+            f.expand(&loaded).unwrap()["p"],
             Targets::from([(f.repo.join("out/a"), f.repo.join("a"))])
         );
     }
@@ -197,7 +223,7 @@ mod tests {
         let f = fixture(&["zsh/.zshrc", "zsh/.zshenv", "zsh/README"]);
         let loaded = config(&f, vec![("zsh", vec![group(Some("zsh"), &[".zsh*"], "~")])]);
 
-        assert_eq!(expand(&loaded, &f.home).unwrap()["zsh"].len(), 2);
+        assert_eq!(f.expand(&loaded).unwrap()["zsh"].len(), 2);
     }
 
     #[test]
@@ -207,14 +233,14 @@ mod tests {
         hidden.hidden = true;
         let loaded = config(&f, vec![("p", vec![hidden])]);
 
-        assert_eq!(expand(&loaded, &f.home).unwrap()["p"].len(), 3);
+        assert_eq!(f.expand(&loaded).unwrap()["p"].len(), 3);
     }
 
     #[test]
     fn same_target_from_same_source_is_allowed() {
         let f = fixture(&["a.txt"]);
         let loaded = config(&f, vec![("p", vec![group(None, &["*.txt", "a.*"], "out")])]);
-        assert_eq!(expand(&loaded, &f.home).unwrap()["p"].len(), 1);
+        assert_eq!(f.expand(&loaded).unwrap()["p"].len(), 1);
     }
 
     #[test]
@@ -230,7 +256,7 @@ mod tests {
                 ],
             )],
         );
-        assert!(expand(&loaded, &f.home).is_err());
+        assert!(f.expand(&loaded).is_err());
     }
 
     #[test]
@@ -243,6 +269,22 @@ mod tests {
                 ("q", vec![group(None, &["*.txt"], "out")]),
             ],
         );
-        assert!(expand(&loaded, &f.home).is_err());
+        assert!(f.expand(&loaded).is_err());
+    }
+
+    #[test]
+    fn skips_state_dir_and_managed_links() {
+        let f = fixture(&["a.txt", ".symsync.state/links/x"]);
+        std::fs::create_dir_all(f.repo.join("out")).unwrap();
+        std::os::unix::fs::symlink("../.symsync.state/links/x", f.repo.join("out/a.txt")).unwrap();
+
+        let mut all = group(None, &["**/*"], "out");
+        all.hidden = true;
+        let loaded = config(&f, vec![("p", vec![all])]);
+
+        assert_eq!(
+            f.expand(&loaded).unwrap()["p"],
+            Targets::from([(f.repo.join("out/a.txt"), f.repo.join("a.txt"))])
+        );
     }
 }

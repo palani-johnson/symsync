@@ -99,7 +99,7 @@ impl Context {
         let loaded = LoadedConfig::load(cli.config.as_deref(), &env.cwd)?;
         let state_dir = settings::state_dir(cli.state_dir.as_deref(), &env, Some(&loaded));
         let link_type = settings::link_type(&env, Some(&loaded))?;
-        let desired = desired::expand(&loaded, &env.home)?;
+        let desired = desired::expand(&loaded, &env.home, &state_dir)?;
 
         Ok(Self {
             env,
