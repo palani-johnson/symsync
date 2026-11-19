@@ -1,0 +1,11 @@
+version = 1
+
+[packages.basic]
+config = "../symsync.toml"
+link_type = "relative"
+
+[packages.basic.targets."../out/a.txt"]
+source = "../in/a.txt"
+
+[packages.basic.targets."../out/nested/b.txt"]
+source = "../in/nested/b.txt"
