@@ -99,15 +99,7 @@ pub fn plan(
     still_defines: &dyn Fn(&Path, &str) -> bool,
     scope: Option<&BTreeSet<String>>,
 ) -> Plan {
-    let mut planner = Planner {
-        state,
-        config,
-        link_type,
-        home,
-        plan: Plan::default(),
-        removed: HashSet::new(),
-        created_dirs: HashSet::new(),
-    };
+    let mut planner = Planner::new(state, config, link_type, home);
 
     let in_scope = |name: &String| scope.is_none_or(|scope| scope.contains(name));
 
@@ -176,27 +168,19 @@ pub fn plan(
         );
     }
 
-    planner.plan
+    planner.finish()
 }
 
 /// Plans the removal of a package and all its links, with the state as the only input.
 pub fn plan_remove(state: &State, name: &str, record: &PackageRecord, home: &Path) -> Plan {
-    let mut planner = Planner {
-        state,
-        config: &record.config,
-        link_type: record.link_type,
-        home,
-        plan: Plan::default(),
-        removed: HashSet::new(),
-        created_dirs: HashSet::new(),
-    };
+    let mut planner = Planner::new(state, &record.config, record.link_type, home);
 
     for target in record.targets.keys() {
         planner.unlink(target);
     }
     planner.plan.records.insert(name.to_string(), None);
 
-    planner.plan
+    planner.finish()
 }
 
 /// Plans to move a drifted target back into its source and to link the target again.
@@ -207,15 +191,7 @@ pub fn plan_adopt(
     target: &Path,
     home: &Path,
 ) -> Plan {
-    let mut planner = Planner {
-        state,
-        config: &record.config,
-        link_type: record.link_type,
-        home,
-        plan: Plan::default(),
-        removed: HashSet::new(),
-        created_dirs: HashSet::new(),
-    };
+    let mut planner = Planner::new(state, &record.config, record.link_type, home);
     let source = &record.targets[target];
 
     planner.push(
@@ -232,7 +208,7 @@ pub fn plan_adopt(
     planner.removed.insert(target.to_path_buf());
     planner.link(name, Some(record), target, source);
 
-    planner.plan
+    planner.finish()
 }
 
 struct Planner<'a> {
@@ -245,6 +221,8 @@ struct Planner<'a> {
     removed: HashSet<PathBuf>,
     /// Directories that earlier steps create.
     created_dirs: HashSet<PathBuf>,
+    /// Targets that earlier steps unlink.
+    unlinked: Vec<PathBuf>,
 }
 
 enum Entry {
@@ -254,7 +232,50 @@ enum Entry {
     Dir,
 }
 
-impl Planner<'_> {
+impl<'a> Planner<'a> {
+    fn new(state: &'a State, config: &'a Path, link_type: LinkType, home: &'a Path) -> Self {
+        Self {
+            state,
+            config,
+            link_type,
+            home,
+            plan: Plan::default(),
+            removed: HashSet::new(),
+            created_dirs: HashSet::new(),
+            unlinked: Vec::new(),
+        }
+    }
+
+    /// Adds a note for each directory that the plan leaves without entries.
+    fn finish(mut self) -> Plan {
+        let linked: HashSet<&Path> = self
+            .plan
+            .steps
+            .iter()
+            .filter_map(|step| match &step.action {
+                Action::CreateLink { path, .. } => path.parent(),
+                _ => None,
+            })
+            .collect();
+        let dirs: BTreeSet<&Path> = self.unlinked.iter().filter_map(|t| t.parent()).collect();
+
+        for dir in dirs {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                continue;
+            };
+            let empty = entries
+                .flatten()
+                .all(|entry| self.removed.contains(&entry.path()));
+            if empty && !linked.contains(dir) {
+                self.plan.notes.push(format!(
+                    "{} has no entries left, symsync does not remove directories",
+                    display(dir, self.home)
+                ));
+            }
+        }
+        self.plan
+    }
+
     fn inspect(&self, path: &Path) -> Entry {
         if self.removed.contains(path) {
             return Entry::Missing;
@@ -287,6 +308,7 @@ impl Planner<'_> {
                     Action::RemoveLink(target.to_path_buf()),
                 );
                 self.removed.insert(target.to_path_buf());
+                self.unlinked.push(target.to_path_buf());
             }
             Entry::Missing => {}
             _ => self.plan.notes.push(format!(
@@ -926,5 +948,22 @@ mod tests {
         let plan = f.plan_scoped(&f.desired(&[("q", &[("home/b", "repo/b")])]), &["p"]);
         assert_eq!(messages(&plan), ["unlink  ~/a"]);
         assert_eq!(plan.records["p"], None);
+    }
+
+    #[test]
+    fn notes_directories_left_empty() {
+        let mut f = fixture();
+        let plan = f.plan(
+            LinkType::Absolute,
+            &f.desired(&[("p", &[("home/x/a", "repo/a"), ("home/y/b", "repo/b")])]),
+        );
+        f.apply(plan);
+        std::fs::write(f.path("home/y/keep"), "").unwrap();
+
+        let plan = f.plan(LinkType::Absolute, &f.desired(&[("p", &[])]));
+        assert_eq!(
+            plan.notes,
+            ["~/x has no entries left, symsync does not remove directories"]
+        );
     }
 }
