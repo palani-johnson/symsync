@@ -82,12 +82,15 @@ pub struct Plan {
 }
 
 /// Plans the changes for the packages that `config` wants. Reads the file system but does not change it.
+///
+/// `still_defines` tells if the config at a path still defines a package. It must return `true` when it cannot tell.
 pub fn plan(
     state: &State,
     config: &Path,
     link_type: LinkType,
     desired: &BTreeMap<String, Targets>,
     home: &Path,
+    still_defines: &dyn Fn(&Path, &str) -> bool,
 ) -> Plan {
     let mut planner = Planner {
         state,
@@ -99,30 +102,56 @@ pub fn plan(
         created_dirs: HashSet::new(),
     };
 
+    let mut owned = HashSet::new();
+    for name in desired.keys() {
+        match state.packages.get(name) {
+            Some(record) if record.config == config => {}
+            Some(record) if still_defines(&record.config, name) => {
+                planner.plan.conflicts.push(Conflict::PackageElsewhere {
+                    package: name.clone(),
+                    config: record.config.clone(),
+                });
+                continue;
+            }
+            Some(record) => planner.plan.notes.push(format!(
+                "package {name} moved from {} to {}",
+                record.config.display(),
+                config.display()
+            )),
+            None => {}
+        }
+        owned.insert(name);
+    }
+
     // Removals come first, so that a target can move between packages in one sync.
-    for (name, targets) in desired {
-        if let Some(record) = state.packages.get(name)
-            && record.config == config
-        {
-            for target in record.targets.keys() {
-                if !targets.contains_key(target) {
-                    planner.unlink(target);
+    for (name, record) in &state.packages {
+        match desired.get(name) {
+            Some(targets) if owned.contains(name) => {
+                for target in record.targets.keys() {
+                    if !targets.contains_key(target) {
+                        planner.unlink(target);
+                    }
                 }
             }
+            None if record.config == config => {
+                planner
+                    .plan
+                    .notes
+                    .push(format!("package {name} was removed from the config"));
+                for target in record.targets.keys() {
+                    planner.unlink(target);
+                }
+                planner.plan.records.insert(name.clone(), None);
+            }
+            _ => {}
         }
     }
 
     for (name, targets) in desired {
-        let record = state.packages.get(name);
-        if let Some(record) = record
-            && record.config != config
-        {
-            planner.plan.conflicts.push(Conflict::PackageElsewhere {
-                package: name.clone(),
-                config: record.config.clone(),
-            });
+        if !owned.contains(name) {
             continue;
         }
+        let record = state.packages.get(name);
 
         for (target, source) in targets {
             planner.link(name, record, target, source);
@@ -392,7 +421,23 @@ mod tests {
         }
 
         fn plan(&self, link_type: LinkType, desired: &BTreeMap<String, Targets>) -> Plan {
-            plan(&self.state, &self.config, link_type, desired, &self.home)
+            self.plan_with(link_type, desired, &|_, _| true)
+        }
+
+        fn plan_with(
+            &self,
+            link_type: LinkType,
+            desired: &BTreeMap<String, Targets>,
+            still_defines: &dyn Fn(&Path, &str) -> bool,
+        ) -> Plan {
+            plan(
+                &self.state,
+                &self.config,
+                link_type,
+                desired,
+                &self.home,
+                still_defines,
+            )
         }
 
         fn record(&mut self, name: &str, config: &Path, targets: &[(&str, &str)]) {
@@ -681,5 +726,70 @@ mod tests {
                 config: f.path("other/symsync.toml")
             }]
         );
+    }
+
+    #[test]
+    fn moved_package_is_claimed_and_relinked() {
+        let mut f = fixture();
+        let plan = f.plan(
+            LinkType::Absolute,
+            &f.desired(&[("p", &[("home/a", "repo/a"), ("home/b", "repo/b")])]),
+        );
+        f.apply(plan);
+        f.state.packages.get_mut("p").unwrap().config = f.path("old/symsync.toml");
+
+        std::fs::create_dir_all(f.path("moved")).unwrap();
+        std::fs::write(f.path("moved/a"), "moved a").unwrap();
+        let plan = f.plan_with(
+            LinkType::Absolute,
+            &f.desired(&[("p", &[("home/a", "moved/a")])]),
+            &|_, _| false,
+        );
+        assert!(plan.conflicts.is_empty(), "{:?}", plan.conflicts);
+        assert_eq!(plan.notes.len(), 1);
+        assert!(messages(&plan).contains(&"unlink  ~/b"));
+
+        f.apply(plan);
+        assert_eq!(f.state.packages["p"].config, f.config);
+        assert_eq!(
+            std::fs::read_to_string(f.path("home/a")).unwrap(),
+            "moved a"
+        );
+        assert!(!f.path("home/b").is_symlink());
+    }
+
+    #[test]
+    fn package_removed_from_config_is_unlinked() {
+        let mut f = fixture();
+        let plan = f.plan(
+            LinkType::Absolute,
+            &f.desired(&[
+                ("p", &[("home/a", "repo/a")]),
+                ("q", &[("home/b", "repo/b")]),
+            ]),
+        );
+        f.apply(plan);
+
+        let plan = f.plan(
+            LinkType::Absolute,
+            &f.desired(&[("q", &[("home/b", "repo/b")])]),
+        );
+        assert_eq!(messages(&plan), ["unlink  ~/a"]);
+        assert_eq!(plan.records["p"], None);
+
+        f.apply(plan);
+        assert!(!f.path("home/a").is_symlink());
+        assert!(!f.state.packages.contains_key("p"));
+        assert!(f.path("home/b").is_symlink());
+    }
+
+    #[test]
+    fn packages_of_other_configs_are_left_alone() {
+        let mut f = fixture();
+        f.record("q", &f.path("other/symsync.toml"), &[("home/b", "other/b")]);
+
+        let plan = f.plan(LinkType::Absolute, &f.desired(&[]));
+        assert!(plan.steps.is_empty());
+        assert!(!plan.records.contains_key("q"));
     }
 }

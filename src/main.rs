@@ -116,7 +116,19 @@ impl Context {
             self.link_type,
             &self.desired,
             &self.env.home,
+            &still_defines,
         )
+    }
+}
+
+/// Whether the config at `config` still defines `package`. A config that cannot be read counts as `true`, so that sync never takes a package by mistake.
+fn still_defines(config: &std::path::Path, package: &str) -> bool {
+    if !config.exists() {
+        return false;
+    }
+    match LoadedConfig::load(Some(config), std::path::Path::new("/")) {
+        Ok(loaded) => loaded.config.packages.contains_key(package),
+        Err(_) => true,
     }
 }
 
