@@ -1,6 +1,7 @@
 mod config;
 mod paths;
 mod settings;
+mod state;
 
 use std::path::PathBuf;
 
