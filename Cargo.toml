@@ -3,6 +3,13 @@ name = "symsync"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.89"
+description = "A stateful symlink farm manager for dotfiles"
+license = "MIT"
+repository = "https://github.com/palani-johnson/symsync"
+readme = "README.md"
+keywords = ["dotfiles", "symlink", "stow", "cli"]
+categories = ["command-line-utilities", "filesystem"]
+include = ["src/**", "tests/**", "docs/**", "README.md", "LICENSE"]
 
 [dependencies]
 anyhow = "1.0"

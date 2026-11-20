@@ -233,3 +233,7 @@ remove  ~/.local/state/symsync/links/3f2a9c…
 ### Config and schema
 
 `config` prints the parsed config as JSON, and `gen-config-schema` prints the JSON schema of the config format.
+
+## License
+
+Symsync is licensed under the [MIT License](LICENSE).
