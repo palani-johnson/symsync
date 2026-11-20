@@ -230,6 +230,14 @@ remove  ~/.local/state/symsync/links/3f2a9c…
 
 `config` prints the parsed config as JSON, and `gen-config-schema` prints the JSON schema of the config format.
 
+The schema of the latest version on `main` is also at `https://raw.githubusercontent.com/palani-johnson/symsync/main/schemas/symsync.schema.json`. To use it in a TOML config with taplo (for example, in Even Better TOML), add this comment at the top of `symsync.toml`:
+
+```toml
+#:schema https://raw.githubusercontent.com/palani-johnson/symsync/main/schemas/symsync.schema.json
+```
+
+Symsync does not accept a `$schema` key, so for a JSON or YAML config, map the file name to the schema URL in your editor settings.
+
 ## License
 
 Symsync is licensed under the [MIT License](LICENSE).

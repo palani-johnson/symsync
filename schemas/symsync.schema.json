@@ -1,0 +1,147 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Config",
+  "description": "A symsync config file.",
+  "type": "object",
+  "properties": {
+    "git_tracked": {
+      "description": "Link only files that git tracks. Packages and link groups can override it. Defaults to true.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "link_type": {
+      "description": "Link type for all packages in this config.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/LinkType"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "packages": {
+      "description": "Packages, keyed by name. Names must be unique in a state directory.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/Package"
+      },
+      "default": {}
+    },
+    "state_dir": {
+      "description": "State directory, relative to the config file.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "LinkGroup": {
+      "description": "A set of source files that link into one target directory.",
+      "type": "object",
+      "properties": {
+        "git_tracked": {
+          "description": "Link only files that git tracks. Overrides the package and config values.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "rename": {
+          "description": "Rules that give sources a different path at the target. Only the first rule that matches a source applies, and a source that no rule matches keeps its path.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Rename"
+          }
+        },
+        "root": {
+          "description": "Directory that the source globs are relative to, relative to the config file. Defaults to the package name.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sources": {
+          "description": "Globs that select source files. Defaults to `**/*`, every file in `root`.",
+          "type": "array",
+          "default": [
+            "**/*"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "target": {
+          "description": "Target directory. Each match goes here, at its path relative to `root`.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "target"
+      ]
+    },
+    "LinkType": {
+      "description": "How symsync stores every path of a package.",
+      "oneOf": [
+        {
+          "description": "All links and recorded paths are absolute.",
+          "type": "string",
+          "const": "absolute"
+        },
+        {
+          "description": "All links and recorded paths are relative, so the chain works after the repo and state directory move together.",
+          "type": "string",
+          "const": "relative"
+        }
+      ]
+    },
+    "Package": {
+      "description": "A named group of links.",
+      "type": "object",
+      "properties": {
+        "git_tracked": {
+          "description": "Link only files that git tracks. Overrides the config value, and link groups can override it.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "links": {
+          "description": "Link groups of the package.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LinkGroup"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "links"
+      ]
+    },
+    "Rename": {
+      "description": "A rule that gives matching sources a different path at the target.",
+      "type": "object",
+      "properties": {
+        "from": {
+          "description": "Glob that matches the source path, relative to `root`.",
+          "type": "string"
+        },
+        "to": {
+          "description": "Target path, relative to `target`. `{n}` is the text of capture `n` of `from`, `{0}` is the whole source path, and `{{` and `}}` are literal braces.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "from",
+        "to"
+      ]
+    }
+  }
+}

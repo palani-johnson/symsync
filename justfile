@@ -36,9 +36,9 @@ install:
 run *args:
     cargo run -- {{ args }}
 
-# print the JSON schema of the config
-schema:
-    cargo run --quiet -- gen-config-schema
+# build every JSON schema in schemas/
+schemas:
+    cargo run --quiet -- gen-config-schema > schemas/symsync.schema.json
 
 ##
 ## Nix recipes
