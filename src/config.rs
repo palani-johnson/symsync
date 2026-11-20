@@ -68,6 +68,21 @@ pub struct LinkGroup {
     /// Let wildcards match names that start with `.`. Without this, only a literal `.` in a glob matches them.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hidden: bool,
+
+    /// Rules that give sources a different path at the target. Only the first rule that matches a source applies, and a source that no rule matches keeps its path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rename: Vec<Rename>,
+}
+
+/// A rule that gives matching sources a different path at the target.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Rename {
+    /// Glob that matches the source path, relative to `root`.
+    pub from: String,
+
+    /// Target path, relative to `target`. `{n}` is the text of capture `n` of `from`, `{0}` is the whole source path, and `{{` and `}}` are literal braces.
+    pub to: String,
 }
 
 /// A config together with the absolute path of the file it came from.
@@ -231,6 +246,21 @@ packages:
         let config = parse("state_dir = \".state\"", Path::new("symsync.toml")).unwrap();
         assert!(config.packages.is_empty());
         assert!(parse("", Path::new("symsync.toml")).is_ok());
+    }
+
+    #[test]
+    fn parses_rename_rules_in_order() {
+        let content = r#"
+            [[packages.zsh.links]]
+            sources = ["*"]
+            target = "~"
+            rename = [{ from = "dot-zshrc", to = "zshrc" }, { from = "dot-*", to = ".{1}" }]
+        "#;
+        let config = parse(content, Path::new("symsync.toml")).unwrap();
+        let rename = &config.packages["zsh"].links[0].rename;
+        assert_eq!(rename.len(), 2);
+        assert_eq!(rename[0].from, "dot-zshrc");
+        assert_eq!(rename[1].to, ".{1}");
     }
 
     #[test]

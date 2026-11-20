@@ -67,7 +67,19 @@ sources = ["**/*.json"]
 target = "~/.config/zed"
 ```
 
-Wildcards do not match names that start with `.`, so `**/*` does not go into `.git/`. A literal `.` in a glob matches them, as in `.*` above. To let wildcards match hidden files too, set `hidden = true` on the link group.
+Globs use the [wax](https://github.com/olson-sean-k/wax) syntax and must be relative to `root`. Wildcards do not match names that start with `.`, so `**/*` does not go into `.git/`. A literal `.` in a glob matches them, as in `.*` above. To let wildcards match hidden files too, set `hidden = true` on the link group.
+
+To give a source a different path at the target, add `rename` rules to the link group. For each source, only the first rule whose `from` glob matches applies. In `to`, `{n}` is the text of capture `n` of `from`. Each wildcard, class, alternation and repetition is one capture, numbered from 1.
+
+```toml
+[[packages.zsh.links]]
+root = "zsh"
+sources = ["*"]
+target = "~"
+rename = [{ from = "dot-*", to = ".{1}" }]
+```
+
+This links `zsh/dot-zshrc` to `~/.zshrc`. See the [design document](docs/design.md#rename) for the full rules.
 
 The config file, the state directory, and links that symsync manages are never sources. When a glob matches no files, `plan` and `sync` show a warning, because a typo or a renamed `root` otherwise unlinks the whole package:
 

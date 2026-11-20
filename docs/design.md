@@ -146,9 +146,34 @@ Each link group has these fields:
 - `root`: the directory that the source globs are relative to. The default is the config directory.
 - `sources`: globs that select source files.
 - `target`: the target directory. Each match goes to `target` joined with the path of the match relative to `root`. For example, `zed/themes/dark.json` with `root = "zed"` goes to `~/.config/zed/themes/dark.json`.
-- `hidden`: when `true`, wildcards also match names that start with `.`. The default is `false`: wildcards skip hidden files and directories (so `**/*` does not go into `.git/`), and only a literal `.` in a glob matches them, as in `.zshrc`, `.*` or `.config/**/*`.
+- `hidden`: when `true`, wildcards also match names that start with `.`. The default is `false`: wildcards skip hidden files and directories (so `**/*` does not go into `.git/`), and only a literal `.` in a glob matches them, as in `.zshrc`, `.*`, `{.zshrc,.zshenv}` or `.config/**/*`.
+- `rename`: an ordered list of rules that give sources a different path at the target (see [Rename](#rename)).
 
-Globs select only files. Symsync does not link directories. A target always has the same name as its source, relative to `root`. There is no syntax to map one source to a target with a different name.
+Globs use the [wax](https://github.com/olson-sean-k/wax) syntax. A glob must be relative to `root`, so a glob that starts with `/` or has a `.` or `..` component is an error. Globs select only files. Symsync does not link directories.
+
+### Rename
+
+By default, a target has the same path as its source, relative to `root`. A rename rule has two fields:
+
+- `from`: a glob that matches the source path relative to `root`.
+- `to`: the target path relative to `target`. `{n}` is the text of capture `n` of `from`, and `{0}` is the whole source path. Each wildcard, class, alternation and repetition in `from` is one capture, numbered from 1 in the order they occur. `{{` and `}}` are literal braces.
+
+For each source, symsync uses only the first rule whose `from` matches. A source that no rule matches keeps its path. Rename rules do not change which files are sources, and `hidden` does not apply to them.
+
+```toml
+[[packages.zsh.links]]
+root = "zsh"
+sources = ["**/*"]
+target = "~"
+rename = [
+  { from = "zshrc.local", to = ".zshrc" },
+  { from = "**/dot-*", to = "{1}.{2}" },
+]
+```
+
+Here `zshrc.local` links to `~/.zshrc`, `dot-zshenv` links to `~/.zshenv`, and `dir/dot-profile` links to `~/dir/.profile`.
+
+A renamed path must be a relative path inside `target`, so a result that is empty or has a `.` or `..` component is an error. When two sources rename to the same target, sync stops with a conflict. A rule that renames no source gives a warning, like a glob that matches no files.
 
 Some files are never sources, even when a glob matches them:
 
@@ -253,7 +278,6 @@ Symsync is a tool to manage dotfiles for one user. These edge cases are known, a
 - **`plan` and `sync` can disagree in rare layouts:** if one link group creates a file at a path that another link group uses as a directory, or if a parent directory of a target is a dangling symlink, `plan` shows no conflict but `sync` fails partway. Because sync records old and new targets before any change, the next sync recovers.
 - **Ownership checks ignore other state directories:** when symsync checks whether another config still defines a package, it does not check that the other config uses the same state directory.
 - **`--package` still expands all packages:** a bad glob or a target collision in another package also stops a filtered run.
-- **Absolute globs:** a glob such as `/etc/hosts` is joined to `root`, so it matches nothing and only gives a warning.
 - **`~` in `adopt`:** the shell expands `~`. A quoted `'~/x'` is not expanded.
 - **Unicode normalization:** state link names hash the bytes of the target path. On macOS, the same name in NFC and NFD form gives two different state links.
 - **`$SYMSYNC_STATE_DIR` overrides the config:** when it is set in your shell, it also replaces `state_dir` in a config, for example in the examples folder.

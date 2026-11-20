@@ -1,9 +1,12 @@
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::ops::Range;
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use wax::walk::Entry;
+use wax::{CandidatePath, Glob, MatchedText, Program};
 
-use crate::config::LoadedConfig;
+use crate::config::{LoadedConfig, Rename};
 use crate::paths::{display, normalize, resolve};
 
 /// Source of each target, keyed by target. All paths are absolute.
@@ -57,6 +60,13 @@ pub fn expand(loaded: &LoadedConfig, home: &Path, state_dir: &Path) -> Result<Ex
                 None => loaded.dir().to_path_buf(),
             };
             let target_dir = resolve(&group.target, loaded.dir(), home)?;
+            let rules = group
+                .rename
+                .iter()
+                .map(RenameRule::new)
+                .collect::<Result<Vec<_>>>()
+                .with_context(|| format!("invalid rename in package {name}"))?;
+            let mut used = vec![false; rules.len()];
 
             for source in &group.sources {
                 let mut matched = false;
@@ -68,6 +78,8 @@ pub fn expand(loaded: &LoadedConfig, home: &Path, state_dir: &Path) -> Result<Ex
                     let rel = path.strip_prefix(&root).with_context(|| {
                         format!("{} is outside of root {}", path.display(), root.display())
                     })?;
+                    let rel = rename(&rules, rel, &mut used)
+                        .with_context(|| format!("failed to rename in package {name}"))?;
                     let target = normalize(&target_dir.join(rel));
 
                     if let Some((owner, owner_source)) = owners.get(&target)
@@ -87,6 +99,19 @@ pub fn expand(loaded: &LoadedConfig, home: &Path, state_dir: &Path) -> Result<Ex
                     expansion.warnings.push((
                         name.clone(),
                         format!("glob {source} in {} matched no files", display(&root, home)),
+                    ));
+                }
+            }
+
+            for (rule, used) in rules.iter().zip(used) {
+                if !used {
+                    expansion.warnings.push((
+                        name.clone(),
+                        format!(
+                            "rename {} in {} renamed no files",
+                            rule.from_text,
+                            display(&root, home)
+                        ),
                     ));
                 }
             }
@@ -111,31 +136,186 @@ fn belongs_to_state(path: &Path, state_dir: &Path) -> bool {
 
 /// Files that match `pattern` under `root`, normalized. Unless `hidden` is set, a name that starts with `.` matches only a literal `.` in the pattern.
 fn matches(root: &Path, pattern: &str, hidden: bool) -> Result<Vec<PathBuf>> {
-    let invalid = || format!("invalid glob {pattern}");
-    let full = format!(
-        "{}/{pattern}",
-        glob::Pattern::escape(&root.to_string_lossy())
-    );
-    let paths = glob::glob(&full).with_context(invalid)?;
-
-    // The glob walker drops every hidden entry when `require_literal_leading_dot` is set, even for `.*`, so the rule is applied to each match instead.
-    let relative = glob::Pattern::new(pattern).with_context(invalid)?;
-    let options = glob::MatchOptions {
-        require_literal_leading_dot: !hidden,
-        ..glob::MatchOptions::new()
-    };
+    let glob = Glob::new(pattern).with_context(|| format!("invalid glob {pattern}"))?;
+    if pattern.starts_with('/') || glob.has_semantic_literals() {
+        bail!("glob {pattern} must be relative to root, without . or .. components");
+    }
+    if !root.is_dir() {
+        return Ok(Vec::new());
+    }
 
     let mut files = Vec::new();
-    for path in paths {
-        let path = path.with_context(|| format!("failed to read a match of {pattern}"))?;
-        let visible = path
-            .strip_prefix(root)
-            .is_ok_and(|rel| relative.matches_path_with(rel, options));
-        if visible && path.is_file() {
-            files.push(normalize(&path));
+    for entry in glob.walk(root) {
+        let entry = entry.with_context(|| format!("failed to read a match of {pattern}"))?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
         }
+        if !hidden {
+            let rel = relative_text(path, root)?;
+            if !dots_are_literal(&glob, pattern, rel) {
+                continue;
+            }
+        }
+        files.push(normalize(path));
     }
     Ok(files)
+}
+
+fn relative_text<'p>(path: &'p Path, root: &Path) -> Result<&'p str> {
+    path.strip_prefix(root)
+        .ok()
+        .and_then(Path::to_str)
+        .with_context(|| format!("{} is not a UTF-8 path in {}", path.display(), root.display()))
+}
+
+/// Whether every name in `rel` that starts with `.` gets its `.` from a literal in `glob`. An alternation counts as a literal, as in `{.zshrc,.zshenv}`.
+fn dots_are_literal(glob: &Glob, expression: &str, rel: &str) -> bool {
+    let candidate = CandidatePath::from(rel);
+    let Some(matched) = glob.matched(&candidate) else {
+        return false;
+    };
+    // Wax has no leading-dot option, so a dot is not literal when it is inside the text of a wildcard, class or repetition capture.
+    let wild: Vec<Range<usize>> = glob
+        .captures()
+        .filter(|token| !expression[token.span().0..].starts_with('{'))
+        .filter_map(|token| matched.get(token.index()))
+        .map(|text| {
+            let start = text.as_ptr().addr() - rel.as_ptr().addr();
+            start..start + text.len()
+        })
+        .collect();
+
+    hidden_offsets(rel).all(|offset| !wild.iter().any(|range| range.contains(&offset)))
+}
+
+/// Byte offsets of the `.` of each name in `rel` that starts with `.`.
+fn hidden_offsets(rel: &str) -> impl Iterator<Item = usize> + '_ {
+    std::iter::once(0)
+        .chain(rel.match_indices('/').map(|(i, _)| i + 1))
+        .filter(|&i| rel[i..].starts_with('.'))
+}
+
+struct RenameRule {
+    from: Glob<'static>,
+    from_text: String,
+    to: Vec<Part>,
+}
+
+enum Part {
+    Text(String),
+    Capture(usize),
+}
+
+impl RenameRule {
+    fn new(rule: &Rename) -> Result<Self> {
+        let from = Glob::new(&rule.from)
+            .with_context(|| format!("invalid glob {}", rule.from))?
+            .into_owned();
+        let to = parse_template(&rule.to)
+            .with_context(|| format!("invalid rename target {}", rule.to))?;
+
+        let captures = from.captures().count();
+        if let Some(index) = to.iter().find_map(|part| match part {
+            Part::Capture(index) if *index > captures => Some(*index),
+            _ => None,
+        }) {
+            bail!(
+                "{} refers to capture {index}, but {} has {captures}",
+                rule.to,
+                rule.from
+            );
+        }
+
+        Ok(Self {
+            from,
+            from_text: rule.from.clone(),
+            to,
+        })
+    }
+
+    fn fill(&self, matched: &MatchedText) -> String {
+        self.to
+            .iter()
+            .map(|part| match part {
+                Part::Text(text) => text.as_str(),
+                Part::Capture(index) => matched.get(*index).unwrap_or_default(),
+            })
+            .collect()
+    }
+}
+
+fn parse_template(template: &str) -> Result<Vec<Part>> {
+    let mut parts = Vec::new();
+    let mut text = String::new();
+    let mut chars = template.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        match c {
+            '{' if chars.peek() == Some(&'{') => {
+                chars.next();
+                text.push('{');
+            }
+            '}' if chars.peek() == Some(&'}') => {
+                chars.next();
+                text.push('}');
+            }
+            '{' => {
+                let mut index = String::new();
+                loop {
+                    match chars.next() {
+                        Some('}') => break,
+                        Some(c) => index.push(c),
+                        None => bail!("unclosed {{, use {{{{ for a literal brace"),
+                    }
+                }
+                let index = index
+                    .parse()
+                    .with_context(|| format!("{{{index}}} is not a capture number"))?;
+                if !text.is_empty() {
+                    parts.push(Part::Text(std::mem::take(&mut text)));
+                }
+                parts.push(Part::Capture(index));
+            }
+            '}' => bail!("unmatched }}, use }}}} for a literal brace"),
+            c => text.push(c),
+        }
+    }
+    if !text.is_empty() {
+        parts.push(Part::Text(text));
+    }
+    Ok(parts)
+}
+
+/// The path of `rel` at the target: the result of the first rule that matches it, or `rel` itself. Marks the rule that applies in `used`.
+fn rename(rules: &[RenameRule], rel: &Path, used: &mut [bool]) -> Result<PathBuf> {
+    let text = rel
+        .to_str()
+        .with_context(|| format!("{} is not a UTF-8 path", rel.display()))?;
+    let candidate = CandidatePath::from(text);
+
+    let Some((index, rule, matched)) = rules
+        .iter()
+        .enumerate()
+        .find_map(|(i, rule)| Some((i, rule, rule.from.matched(&candidate)?)))
+    else {
+        return Ok(rel.to_path_buf());
+    };
+    used[index] = true;
+
+    let renamed = PathBuf::from(rule.fill(&matched));
+    let valid = renamed.components().next().is_some()
+        && renamed
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)));
+    if !valid {
+        bail!(
+            "rename {} turns {text} into {}, which is not a relative path inside the target",
+            rule.from_text,
+            renamed.display()
+        );
+    }
+    Ok(renamed)
 }
 
 #[cfg(test)]
@@ -179,7 +359,20 @@ mod tests {
             sources: sources.iter().map(|s| s.to_string()).collect(),
             target: target.into(),
             hidden: false,
+            rename: Vec::new(),
         }
+    }
+
+    fn renamed(sources: &[&str], rules: &[(&str, &str)]) -> LinkGroup {
+        let mut group = group(None, sources, "out");
+        group.rename = rules
+            .iter()
+            .map(|(from, to)| Rename {
+                from: from.to_string(),
+                to: to.to_string(),
+            })
+            .collect();
+        group
     }
 
     fn config(fixture: &Fixture, packages: Vec<(&str, Vec<LinkGroup>)>) -> LoadedConfig {
@@ -272,6 +465,112 @@ mod tests {
         let loaded = config(&f, vec![("p", vec![hidden])]);
 
         assert_eq!(f.expand(&loaded).unwrap()["p"].len(), 3);
+    }
+
+    #[test]
+    fn alternation_dots_are_literal() {
+        let f = fixture(&[".zshrc", ".zshenv", ".other"]);
+        let loaded = config(&f, vec![("p", vec![group(None, &["{.zshrc,.zshenv}"], "out")])]);
+
+        assert_eq!(f.expand(&loaded).unwrap()["p"].len(), 2);
+    }
+
+    #[test]
+    fn rejects_globs_outside_root() {
+        let f = fixture(&["a.txt"]);
+        for pattern in ["../a.txt", "/a.txt", "./a.txt"] {
+            let loaded = config(&f, vec![("p", vec![group(None, &[pattern], "out")])]);
+            assert!(f.expand(&loaded).is_err(), "{pattern}");
+        }
+    }
+
+    #[test]
+    fn missing_root_only_warns() {
+        let f = fixture(&["a.txt"]);
+        let loaded = config(&f, vec![("p", vec![group(Some("nope"), &["*"], "out")])]);
+
+        let expansion = expand(&loaded, &f.home, &f.state).unwrap();
+        assert!(expansion.packages["p"].is_empty());
+        assert_eq!(expansion.warnings.len(), 1);
+    }
+
+    #[test]
+    fn first_matching_rename_applies() {
+        let f = fixture(&["dot-zshrc", "dot-zshenv", "README"]);
+        let rules = [("dot-zshrc", "zshrc"), ("dot-*", ".{1}")];
+        let loaded = config(&f, vec![("p", vec![renamed(&["*"], &rules)])]);
+
+        assert_eq!(
+            f.expand(&loaded).unwrap()["p"],
+            Targets::from([
+                (f.repo.join("out/zshrc"), f.repo.join("dot-zshrc")),
+                (f.repo.join("out/.zshenv"), f.repo.join("dot-zshenv")),
+                (f.repo.join("out/README"), f.repo.join("README")),
+            ])
+        );
+    }
+
+    #[test]
+    fn rename_uses_tree_captures() {
+        let f = fixture(&["dot-a", "dir/dot-b"]);
+        let loaded = config(
+            &f,
+            vec![("p", vec![renamed(&["**/*"], &[("**/dot-*", "{1}.{2}")])])],
+        );
+
+        assert_eq!(
+            f.expand(&loaded).unwrap()["p"],
+            Targets::from([
+                (f.repo.join("out/.a"), f.repo.join("dot-a")),
+                (f.repo.join("out/dir/.b"), f.repo.join("dir/dot-b")),
+            ])
+        );
+    }
+
+    #[test]
+    fn rename_keeps_literal_braces() {
+        let f = fixture(&["a"]);
+        let loaded = config(&f, vec![("p", vec![renamed(&["a"], &[("a", "{{{0}}}")])])]);
+
+        assert_eq!(
+            f.expand(&loaded).unwrap()["p"],
+            Targets::from([(f.repo.join("out/{a}"), f.repo.join("a"))])
+        );
+    }
+
+    #[test]
+    fn rejects_renames_outside_target() {
+        let f = fixture(&["a", "dot-"]);
+        for (from, to) in [("a", "../a"), ("a", "/a"), ("a", ""), ("dot-*", ".{1}")] {
+            let loaded = config(&f, vec![("p", vec![renamed(&["*"], &[(from, to)])])]);
+            assert!(f.expand(&loaded).is_err(), "{from} -> {to}");
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_rename_targets() {
+        let f = fixture(&["a"]);
+        for to in ["{2}", "{x}", "{1", "a}"] {
+            let loaded = config(&f, vec![("p", vec![renamed(&["*"], &[("*", to)])])]);
+            assert!(f.expand(&loaded).is_err(), "{to}");
+        }
+    }
+
+    #[test]
+    fn rejects_renames_to_one_target() {
+        let f = fixture(&["a", "b"]);
+        let loaded = config(&f, vec![("p", vec![renamed(&["*"], &[("*", "same")])])]);
+        assert!(f.expand(&loaded).is_err());
+    }
+
+    #[test]
+    fn warns_about_renames_that_rename_nothing() {
+        let f = fixture(&["a"]);
+        let rules = [("*", "{1}"), ("a", "b"), ("x", "y")];
+        let loaded = config(&f, vec![("p", vec![renamed(&["*"], &rules)])]);
+
+        let expansion = expand(&loaded, &f.home, &f.state).unwrap();
+        assert_eq!(expansion.warnings.len(), 2, "{:?}", expansion.warnings);
     }
 
     #[test]
