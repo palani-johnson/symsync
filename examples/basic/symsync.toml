@@ -1,4 +1,7 @@
-[[entries]]
-sources = ["*.txt"]
+state_dir = ".symsync.state"
+link_type = "relative"
+
+[[packages.basic.links]]
+root = "in"
+sources = ["**/*"]
 target = "out"
-target_link_type = "relative"

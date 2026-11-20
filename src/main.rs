@@ -1,337 +1,395 @@
 mod config;
+mod desired;
+mod execute;
+mod health;
+mod paths;
 mod plan;
+mod settings;
+mod state;
 
-use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 
-use config::SymsyncConfig;
-use plan::{StateItem, plan_link, plan_unlink};
+use config::{LinkType, LoadedConfig};
+use desired::Targets;
+use settings::Env;
+use state::State;
 
-/// A symlink farm manager.
+/// A stateful symlink farm manager.
 #[derive(Parser, Debug)]
 #[command(version, about)]
 struct Cli {
+    /// Path to the config file.
+    #[arg(long, global = true)]
+    config: Option<PathBuf>,
+
+    /// Path to the state directory.
+    #[arg(long, global = true)]
+    state_dir: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Command,
 }
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Show the plan of sync operations.
-    Plan,
+    /// Show the changes that sync would make.
+    Plan {
+        /// Only plan these packages. Can be given more than once.
+        #[arg(short, long = "package", value_name = "NAME")]
+        packages: Vec<String>,
+    },
 
-    /// Sync the symlink farm.
-    Sync,
+    /// Apply the plan for all packages in the config.
+    Sync {
+        /// Only sync these packages. Can be given more than once.
+        #[arg(short, long = "package", value_name = "NAME")]
+        packages: Vec<String>,
+    },
 
-    /// Print the symsync config.
+    /// Show all packages and the health of their targets.
+    Status,
+
+    /// Remove a package and all its links, using only the state.
+    Remove {
+        /// Name of the package.
+        package: String,
+    },
+
+    /// Remove state links that no package records.
+    Prune,
+
+    /// Move a drifted target back into its source and restore the link.
+    Adopt {
+        /// Path of the drifted target.
+        target: PathBuf,
+    },
+
+    /// Print the parsed config.
     Config,
 
-    /// Generate the JSON schema for the symsync config format.
+    /// Print the JSON schema of the config.
     GenConfigSchema,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    match cli.command {
-        Command::Plan => cmd_plan(),
-        Command::Sync => cmd_sync(),
-        Command::Config => cmd_config(),
-        Command::GenConfigSchema => cmd_config_gen_schema(),
+    match &cli.command {
+        Command::Plan { packages } => cmd_plan(&cli, packages),
+        Command::Sync { packages } => cmd_sync(&cli, packages),
+        Command::Status => cmd_status(&cli),
+        Command::Remove { package } => cmd_remove(&cli, package),
+        Command::Prune => cmd_prune(&cli),
+        Command::Adopt { target } => cmd_adopt(&cli, target),
+        Command::Config => {
+            let loaded = LoadedConfig::load(cli.config.as_deref(), &std::env::current_dir()?)?;
+            println!("{}", serde_json::to_string_pretty(&loaded.config)?);
+            Ok(())
+        }
+        Command::GenConfigSchema => {
+            println!("{}", serde_json::to_string_pretty(&config::schema())?);
+            Ok(())
+        }
     }
 }
 
-/// Find the symsync config file in the current directory.
-///
-/// Tries each supported filename in order:
-/// `symsync.toml`, `symsync.json`, `symsync.jsonc`, `symsync.json5`, `symsync.yaml`, `symsync.yml`
-fn get_config_path() -> Result<PathBuf> {
-    let candidates = [
-        "symsync.toml",
-        "symsync.json",
-        "symsync.jsonc",
-        "symsync.json5",
-        "symsync.yaml",
-        "symsync.yml",
-    ];
+/// Everything that planning for the current config needs.
+struct Context {
+    env: Env,
+    loaded: LoadedConfig,
+    state_dir: PathBuf,
+    link_type: LinkType,
+    desired: BTreeMap<String, Targets>,
+    warnings: Vec<(String, String)>,
+    /// Packages to plan, or `None` for all of them.
+    scope: Option<BTreeSet<String>>,
+}
 
-    candidates
-        .iter()
-        .map(PathBuf::from)
-        .find(|p| p.is_file())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "No config file found. Tried:\n{}",
-                candidates
-                    .iter()
-                    .map(|p| format!("  - {p}"))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            )
+impl Context {
+    fn load(cli: &Cli, packages: &[String]) -> Result<Self> {
+        let env = Env::from_process()?;
+        let loaded = LoadedConfig::load(cli.config.as_deref(), &env.cwd)?;
+        let state_dir = paths::canonicalize_existing(&settings::state_dir(
+            cli.state_dir.as_deref(),
+            &env,
+            Some(&loaded),
+        ));
+        let link_type = settings::link_type(&env, Some(&loaded))?;
+        let mut expansion = desired::expand(&loaded, &env.home, &state_dir)?;
+        if link_type == LinkType::Relative {
+            desired::check_contained(&expansion.packages, &state_dir, loaded.dir(), &env.home)?;
+        }
+
+        let scope =
+            (!packages.is_empty()).then(|| packages.iter().cloned().collect::<BTreeSet<String>>());
+        if let Some(scope) = &scope {
+            expansion.packages.retain(|name, _| scope.contains(name));
+            expansion.warnings.retain(|(name, _)| scope.contains(name));
+        }
+
+        Ok(Self {
+            env,
+            loaded,
+            state_dir,
+            link_type,
+            desired: expansion.packages,
+            warnings: expansion.warnings,
+            scope,
         })
-}
-
-/// Ensure the `.symsync.state` directory exists next to the config file.
-///
-/// The expected layout is:
-///
-/// ```text
-/// .symsync.state/
-///   sources/          ← symlinks named by SHA-1, each pointing to a source file
-///   targets.toml      ← tracks which targets are managed by symsync
-/// ```
-///
-/// If the state directory does not exist the full layout is created. If it
-/// exists but does not match the expected layout an error is returned.
-///
-/// Returns the absolute path to the state directory.
-fn ensure_state_dir(config_path: &Path) -> Result<PathBuf> {
-    let root = config_path.parent().unwrap_or(Path::new("."));
-    let state_dir = root.join(".symsync.state");
-    let sources_dir = state_dir.join("sources");
-    let targets_file = state_dir.join("targets.toml");
-
-    if !state_dir.exists() {
-        std::fs::create_dir_all(&sources_dir).with_context(|| {
-            format!(
-                "Failed to create sources directory {}",
-                sources_dir.display()
-            )
-        })?;
-        std::fs::write(&targets_file, "")
-            .with_context(|| format!("Failed to create targets file {}", targets_file.display()))?;
     }
 
-    if state_dir.is_dir() && sources_dir.is_dir() && targets_file.is_file() {
-        Ok(state_dir)
-    } else {
-        bail!(
-            "State directory {} must not exist, or must exist with the expected structure:\n  {}/\n  {}",
-            state_dir.display(),
-            sources_dir.display(),
-            targets_file.display(),
-        )
-    }
-}
-
-/// Sync the symlink farm by executing the computed plan.
-///
-/// Each step is executed in order. If any step fails — either because it is an
-/// [`ErrorStep`] representing a conflict, or because an IO operation fails —
-/// execution stops immediately and the error is returned.
-///
-/// Stale targets — entries present in `targets.toml` that no longer appear in
-/// the config — are unlinked first, then the current set of links is created.
-/// On success, [`targets.toml`] is updated to reflect the current set of
-/// managed targets.
-///
-/// [`ErrorStep`]: plan::ErrorStep
-/// [`targets.toml`]: ensure_state_dir
-fn cmd_sync() -> Result<()> {
-    let config_path = get_config_path()?;
-    let sync_config = SymsyncConfig::parse_file(&config_path)?;
-    let root_dir = config_path.parent().unwrap_or(Path::new("."));
-
-    let state_items = StateItem::generate(root_dir, &sync_config)?;
-    let state_dir = ensure_state_dir(&config_path)?;
-
-    // --- Unlink stale targets ---
-    let old_targets = get_targets(&state_dir);
-    let new_target_paths: std::collections::HashSet<String> = state_items
-        .iter()
-        .map(|item| {
-            PathBuf::from(&item.target)
-                .join(&item.link)
-                .to_string_lossy()
-                .into_owned()
-        })
-        .collect();
-    let active_hashes: std::collections::HashSet<&str> = state_items
-        .iter()
-        .map(|item| item.state_hash.as_str())
-        .collect();
-
-    let mut did_anything = false;
-    let mut printed = false;
-
-    for (target_path_str, state_hash) in &old_targets {
-        if !new_target_paths.contains(target_path_str) {
-            let target_path = PathBuf::from(target_path_str);
-            // Only remove the state link when no active target shares this hash.
-            let hash_still_needed = active_hashes.contains(state_hash.as_str());
-            for step in plan_unlink(&target_path, state_hash, &state_dir, hash_still_needed) {
-                step.execute()?;
-                if !step.is_noop() {
-                    did_anything = true;
-                }
-                if let Some(msg) = step.message() {
-                    println!("{msg}");
-                    printed = true;
-                }
-            }
-            // Notify the user if the parent directory is now empty.
-            if let Some(parent) = target_path.parent() {
-                if parent.is_dir()
-                    && std::fs::read_dir(parent)
-                        .map(|mut d| d.next().is_none())
-                        .unwrap_or(false)
-                {
-                    println!(
-                        "note: {} is now empty, you may want to remove it",
-                        parent.display()
-                    );
-                }
-            }
+    fn print_warnings(&self) {
+        for (package, warning) in &self.warnings {
+            println!("warning: package {package}: {warning}");
         }
     }
 
-    // --- Link current targets ---
-    for state_item in &state_items {
-        for step in plan_link(state_item, &state_dir) {
-            step.execute()?;
-            if !step.is_noop() {
-                did_anything = true;
-            }
-            if let Some(msg) = step.message() {
-                println!("{msg}");
-                printed = true;
+    fn plan(&self, state: &State) -> Result<plan::Plan> {
+        for name in self.scope.iter().flatten() {
+            let in_config = self.loaded.config.packages.contains_key(name);
+            let in_state = state
+                .packages
+                .get(name)
+                .is_some_and(|record| record.config == self.loaded.path);
+            if !in_config && !in_state {
+                bail!(
+                    "no package {name} in {}",
+                    paths::display(&self.loaded.path, &self.env.home)
+                );
             }
         }
+
+        Ok(plan::plan(
+            state,
+            &self.loaded.path,
+            self.link_type,
+            &self.desired,
+            &self.env.home,
+            &still_defines,
+            self.scope.as_ref(),
+        ))
     }
+}
 
-    if !did_anything {
-        println!("already in sync");
-    } else if !printed {
-        println!("synced");
+/// Whether the config at `config` still defines `package`. A config that cannot be read counts as `true`, so that sync never takes a package by mistake.
+fn still_defines(config: &std::path::Path, package: &str) -> bool {
+    if !config.exists() {
+        return false;
     }
+    match LoadedConfig::load(Some(config), std::path::Path::new("/")) {
+        Ok(loaded) => loaded.config.packages.contains_key(package),
+        Err(_) => true,
+    }
+}
 
-    write_targets_file(&state_dir, &state_items).context("Failed to update targets.toml")?;
+fn print_findings(plan: &plan::Plan, home: &std::path::Path) {
+    for note in &plan.notes {
+        println!("note: {note}");
+    }
+    for conflict in &plan.conflicts {
+        println!("conflict: {}", conflict.message(home));
+    }
+}
 
+fn cmd_plan(cli: &Cli, packages: &[String]) -> Result<()> {
+    let ctx = Context::load(cli, packages)?;
+    let state = State::read(&ctx.state_dir)?;
+    let plan = ctx.plan(&state)?;
+    ctx.print_warnings();
+
+    for message in plan.steps.iter().filter_map(|s| s.message.as_deref()) {
+        println!("{message}");
+    }
+    print_findings(&plan, &ctx.env.home);
+
+    if !plan.conflicts.is_empty() {
+        bail!("sync is blocked by {} conflict(s)", plan.conflicts.len());
+    }
+    if plan.steps.is_empty() {
+        println!("nothing to do");
+    }
     Ok(())
 }
 
-/// Read `targets.toml` from `state_dir` and return its contents as a map from
-/// target path to state hash. Returns an empty map if the file is missing or
-/// unreadable, or if parsing fails.
-fn get_targets(state_dir: &Path) -> BTreeMap<String, String> {
-    std::fs::read_to_string(state_dir.join("targets.toml"))
-        .ok()
-        .and_then(|content| toml::from_str(&content).ok())
-        .unwrap_or_default()
-}
+fn cmd_sync(cli: &Cli, packages: &[String]) -> Result<()> {
+    let ctx = Context::load(cli, packages)?;
+    let mut state = State::open(&ctx.state_dir)?;
+    let plan = ctx.plan(&state)?;
+    ctx.print_warnings();
 
-/// Write `targets.toml` inside `state_dir` with the current set of managed targets.
-///
-/// The file is a flat TOML map from each full target path (raw config target
-/// joined with the source filename, e.g. `"out/file.txt"`) to its SHA-1 hash.
-/// Multiple different target paths can share the same hash if the same source
-/// file is linked to more than one location.
-fn write_targets_file(state_dir: &Path, state_items: &[StateItem]) -> Result<()> {
-    let mut map: BTreeMap<String, String> = BTreeMap::new();
-
-    for item in state_items {
-        let target_path = PathBuf::from(&item.target).join(&item.link);
-        map.insert(
-            target_path.to_string_lossy().into_owned(),
-            item.state_hash.clone(),
+    if !plan.conflicts.is_empty() {
+        print_findings(&plan, &ctx.env.home);
+        bail!(
+            "sync stopped by {} conflict(s), nothing was changed",
+            plan.conflicts.len()
         );
     }
 
-    let content = toml::to_string_pretty(&map).context("Failed to serialize targets.toml")?;
-
-    std::fs::write(state_dir.join("targets.toml"), content)
-        .context("Failed to write targets.toml")?;
-
+    execute::apply(&mut state, &plan.steps, plan.records.clone(), |message| {
+        println!("{message}")
+    })?;
+    print_findings(&plan, &ctx.env.home);
+    if plan.steps.is_empty() {
+        println!("already in sync");
+    }
     Ok(())
 }
 
-/// Parse the config and print it as pretty JSON.
-fn cmd_config() -> Result<()> {
-    let config_path = get_config_path()?;
-    let sync_config = SymsyncConfig::parse_file(&config_path)?;
-    println!("{}", serde_json::to_string_pretty(&sync_config)?);
-    Ok(())
-}
-
-/// Print the JSON schema for the symsync config format.
-fn cmd_config_gen_schema() -> Result<()> {
-    let schema = schemars::schema_for!(SymsyncConfig);
-    println!("{}", serde_json::to_string_pretty(&schema)?);
-    Ok(())
-}
-
-/// Show the full plan: unlink steps for stale targets followed by link steps for
-/// current targets. Each step is printed as a single human-readable line.
-///
-/// If no `targets.toml` exists yet (first run), the unlink phase is skipped.
-fn cmd_plan() -> Result<()> {
-    let config_path = get_config_path()?;
-    let sync_config = SymsyncConfig::parse_file(&config_path)?;
-    let root_dir = config_path
-        .parent()
-        .with_context(|| "Failed to get config directory")?;
-
-    let state_items = StateItem::generate(root_dir, &sync_config)?;
-
-    // Try to locate the state directory so we can read old targets. It is fine
-    // if it does not exist yet — that just means there is nothing to unlink.
-    let state_dir_opt = {
-        let candidate = root_dir.join(".symsync.state");
-        if candidate.is_dir() {
-            Some(candidate)
-        } else {
+/// The state directory for commands that do not need a config. A config is used only if one is given or found.
+fn optional_state_dir(cli: &Cli, env: &Env) -> Result<PathBuf> {
+    // A broken config in the current directory must not block recovery commands.
+    let loaded = match LoadedConfig::load_optional(cli.config.as_deref(), &env.cwd) {
+        Ok(loaded) => loaded,
+        Err(err) if cli.config.is_none() => {
+            println!("warning: ignoring the config in the current directory: {err:#}");
             None
         }
+        Err(err) => return Err(err),
     };
+    Ok(paths::canonicalize_existing(&settings::state_dir(
+        cli.state_dir.as_deref(),
+        env,
+        loaded.as_ref(),
+    )))
+}
 
-    // --- Plan: unlink stale targets ---
-    if let Some(ref state_dir) = state_dir_opt {
-        let old_targets = get_targets(state_dir);
-        let new_target_paths: std::collections::HashSet<String> = state_items
-            .iter()
-            .map(|item| {
-                PathBuf::from(&item.target)
-                    .join(&item.link)
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .collect();
-        let active_hashes: std::collections::HashSet<&str> = state_items
-            .iter()
-            .map(|item| item.state_hash.as_str())
-            .collect();
+fn cmd_status(cli: &Cli) -> Result<()> {
+    let env = Env::from_process()?;
+    let state_dir = optional_state_dir(cli, &env)?;
+    let state = State::read(&state_dir)?;
+    let show = |path: &std::path::Path| paths::display(path, &env.home);
 
-        for (target_path_str, state_hash) in &old_targets {
-            if !new_target_paths.contains(target_path_str) {
-                let target_path = PathBuf::from(target_path_str);
-                let hash_still_needed = active_hashes.contains(state_hash.as_str());
-                for step in plan_unlink(&target_path, state_hash, state_dir, hash_still_needed) {
-                    if let Some(msg) = step.message() {
-                        println!("{msg}");
-                    }
-                }
-            }
+    println!("state: {}", show(&state_dir));
+    if state.packages.is_empty() {
+        println!("no packages");
+    }
+
+    for (name, record) in &state.packages {
+        let orphaned = if still_defines(&record.config, name) {
+            ""
+        } else {
+            "orphaned, "
+        };
+        println!("{name} ({orphaned}{})", show(&record.config));
+        for (target, source) in &record.targets {
+            let health = health::check(&state, target, source);
+            println!("  {:<18} {}", health.to_string(), show(target));
         }
     }
 
-    // --- Plan: link current targets ---
-    let state_dir_for_plan = state_dir_opt.unwrap_or_else(|| root_dir.join(".symsync.state"));
-    let mut did_anything = false;
-    for state_item in &state_items {
-        for step in plan_link(state_item, &state_dir_for_plan) {
-            if let Some(msg) = step.message() {
-                println!("{msg}");
-                did_anything = true;
-            }
+    let stray = state.stray_links()?;
+    if !stray.is_empty() {
+        println!("stray state links, run `symsync prune` to remove them");
+        for link in stray {
+            println!("  {}", show(&link));
+        }
+    }
+    Ok(())
+}
+
+fn cmd_prune(cli: &Cli) -> Result<()> {
+    let env = Env::from_process()?;
+    let state_dir = optional_state_dir(cli, &env)?;
+    if !state_dir.exists() {
+        println!("nothing to prune");
+        return Ok(());
+    }
+
+    let state = State::open(&state_dir)?;
+    let mut steps = Vec::new();
+    for link in state.stray_links()? {
+        let shown = paths::display(&link, &env.home);
+        if link.is_symlink() {
+            steps.push(plan::Step {
+                message: Some(format!("remove  {shown}")),
+                action: plan::Action::RemoveLink(link),
+            });
+        } else {
+            println!("note: {shown} is not a symlink, it was left in place");
         }
     }
 
-    if !did_anything {
-        println!("nothing to do");
+    if steps.is_empty() {
+        println!("nothing to prune");
+    }
+    execute::run_steps(&steps, |message| println!("{message}"))
+}
+
+fn cmd_remove(cli: &Cli, package: &str) -> Result<()> {
+    let env = Env::from_process()?;
+    let state_dir = optional_state_dir(cli, &env)?;
+    if !state_dir.exists() {
+        bail!("no package {package} in {}", state_dir.display());
     }
 
+    let mut state = State::open(&state_dir)?;
+    let Some(record) = state.packages.get(package).cloned() else {
+        bail!("no package {package} in {}", state_dir.display());
+    };
+    let plan = plan::plan_remove(&state, package, &record, &env.home);
+
+    if !plan.conflicts.is_empty() {
+        print_findings(&plan, &env.home);
+        bail!(
+            "remove stopped by {} conflict(s), nothing was changed",
+            plan.conflicts.len()
+        );
+    }
+
+    execute::apply(&mut state, &plan.steps, plan.records.clone(), |message| {
+        println!("{message}")
+    })?;
+    print_findings(&plan, &env.home);
+
+    println!("removed package {package}");
+    if record.config.exists() && still_defines(&record.config, package) {
+        println!(
+            "note: {} still defines {package}, the next sync from it adds the package again",
+            paths::display(&record.config, &env.home)
+        );
+    }
+    Ok(())
+}
+
+fn cmd_adopt(cli: &Cli, target: &std::path::Path) -> Result<()> {
+    let env = Env::from_process()?;
+    let target = paths::normalize(&env.cwd.join(target));
+    let state_dir = optional_state_dir(cli, &env)?;
+    let not_managed = || anyhow::anyhow!("{} is not managed by symsync", target.display());
+    if !state_dir.exists() {
+        return Err(not_managed());
+    }
+
+    let state = State::open(&state_dir)?;
+    let (name, record) = state
+        .packages
+        .iter()
+        .find(|(_, record)| record.targets.contains_key(&target))
+        .map(|(name, record)| (name.clone(), record.clone()))
+        .ok_or_else(not_managed)?;
+
+    let health = health::check(&state, &target, &record.targets[&target]);
+    if health != health::Health::Drifted {
+        bail!(
+            "{} is not drifted, its status is: {health}",
+            target.display()
+        );
+    }
+
+    let plan = plan::plan_adopt(&state, &name, &record, &target, &env.home);
+    if !plan.conflicts.is_empty() {
+        print_findings(&plan, &env.home);
+        bail!(
+            "adopt stopped by {} conflict(s), nothing was changed",
+            plan.conflicts.len()
+        );
+    }
+
+    execute::run_steps(&plan.steps, |message| println!("{message}"))?;
+    print_findings(&plan, &env.home);
     Ok(())
 }
