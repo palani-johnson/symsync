@@ -18,3 +18,12 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+
+  schemas:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo run --quiet -- gen-config-schema > schemas/symsync.schema.json
+      - name: Check that the committed schemas are up to date
+        run: git diff --exit-code -- schemas
