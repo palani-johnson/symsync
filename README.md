@@ -53,16 +53,14 @@ Symsync is made for dotfiles, and it does not try to handle every edge case. The
 
 ## Configuration
 
-Put a `symsync.toml` file at the root of your dotfiles repo (json, json5, jsonc, and yaml are also supported). Each package has one or more link groups. A link group selects files in `root` with globs, and links each file to the same relative path in `target`.
+Put a `symsync.toml` file at the root of your dotfiles repo (json, json5, jsonc, and yaml are also supported). Each package has one or more link groups. A link group selects files in `root` with globs, and links each file to the same relative path in `target`. By default, `root` is the directory with the same name as the package, so the `zsh` package below uses the `zsh` directory.
 
 ```toml
 [[packages.zsh.links]]
-root = "zsh"
 sources = [".*"]
 target = "~"
 
 [[packages.zed.links]]
-root = "zed"
 sources = ["**/*.json"]
 target = "~/.config/zed"
 ```
@@ -76,7 +74,6 @@ By default, symsync links only files that git tracks, so untracked, ignored and 
 git_tracked = false
 
 [[packages.scratch.links]]
-root = "scratch"
 target = "~/scratch"
 ```
 
@@ -84,7 +81,6 @@ To give a source a different path at the target, add `rename` rules to the link 
 
 ```toml
 [[packages.zsh.links]]
-root = "zsh"
 sources = ["*"]
 target = "~"
 rename = [{ from = "dot-*", to = ".{1}" }]

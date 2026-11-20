@@ -125,13 +125,11 @@ link_type = "relative"
 
 [packages.zsh]
 [[packages.zsh.links]]
-root = "zsh"
 sources = [".zshrc", ".zshenv"]
 target = "~"
 
 [packages.zed]
 [[packages.zed.links]]
-root = "zed"
 sources = ["*.json"]
 target = "~/.config/zed"
 ```
@@ -146,7 +144,7 @@ A package has `links`, its list of link groups, and an optional `git_tracked` th
 
 Each link group has these fields:
 
-- `root`: the directory that the source globs are relative to. The default is the config directory.
+- `root`: the directory that the source globs are relative to. The default is the directory with the same name as the package, next to the config file. To use the config directory, set `root = "."`.
 - `sources`: globs that select source files. The default is `["**/*"]`, every file in `root`.
 - `target`: the target directory. Each match goes to `target` joined with the path of the match relative to `root`. For example, `zed/themes/dark.json` with `root = "zed"` goes to `~/.config/zed/themes/dark.json`.
 - `rename`: an ordered list of rules that give sources a different path at the target (see [Rename](#rename)).
@@ -165,7 +163,6 @@ For each source, symsync uses only the first rule whose `from` matches. A source
 
 ```toml
 [[packages.zsh.links]]
-root = "zsh"
 target = "~"
 rename = [
   { from = "zshrc.local", to = ".zshrc" },

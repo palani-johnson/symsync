@@ -59,7 +59,7 @@ pub fn expand(loaded: &LoadedConfig, home: &Path, state_dir: &Path) -> Result<Ex
         for group in &package.links {
             let root = match &group.root {
                 Some(root) => resolve(&root.to_string_lossy(), loaded.dir(), home)?,
-                None => loaded.dir().to_path_buf(),
+                None => normalize(&loaded.dir().join(name)),
             };
             let target_dir = resolve(&group.target, loaded.dir(), home)?;
             let rules = group
@@ -377,7 +377,7 @@ mod tests {
     }
 
     fn renamed(sources: &[&str], rules: &[(&str, &str)]) -> LinkGroup {
-        let mut group = group(None, sources, "out");
+        let mut group = group(Some("."), sources, "out");
         group.rename = rules
             .iter()
             .map(|(from, to)| Rename {
@@ -438,13 +438,13 @@ mod tests {
     }
 
     #[test]
-    fn root_defaults_to_config_dir() {
-        let f = fixture(&["a.txt"]);
+    fn root_defaults_to_package_name() {
+        let f = fixture(&["p/a.txt", "b.txt"]);
         let loaded = config(&f, vec![("p", vec![group(None, &["*.txt"], "out")])]);
 
         assert_eq!(
             f.expand(&loaded).unwrap()["p"],
-            Targets::from([(f.repo.join("out/a.txt"), f.repo.join("a.txt"))])
+            Targets::from([(f.repo.join("out/a.txt"), f.repo.join("p/a.txt"))])
         );
     }
 
@@ -462,7 +462,7 @@ mod tests {
     #[test]
     fn wildcards_match_hidden_files() {
         let f = fixture(&["a", ".hidden", "dir/.hidden"]);
-        let loaded = config(&f, vec![("p", vec![group(None, &["**/*"], "out")])]);
+        let loaded = config(&f, vec![("p", vec![group(Some("."), &["**/*"], "out")])]);
 
         assert_eq!(f.expand(&loaded).unwrap()["p"].len(), 3);
     }
@@ -472,7 +472,7 @@ mod tests {
         let f = fixture(&[".zshrc", ".zshenv", ".other"]);
         let loaded = config(
             &f,
-            vec![("p", vec![group(None, &["{.zshrc,.zshenv}"], "out")])],
+            vec![("p", vec![group(Some("."), &["{.zshrc,.zshenv}"], "out")])],
         );
 
         assert_eq!(f.expand(&loaded).unwrap()["p"].len(), 2);
@@ -482,7 +482,7 @@ mod tests {
     fn rejects_globs_outside_root() {
         let f = fixture(&["a.txt"]);
         for pattern in ["../a.txt", "/a.txt", "./a.txt"] {
-            let loaded = config(&f, vec![("p", vec![group(None, &[pattern], "out")])]);
+            let loaded = config(&f, vec![("p", vec![group(Some("."), &[pattern], "out")])]);
             assert!(f.expand(&loaded).is_err(), "{pattern}");
         }
     }
@@ -586,7 +586,7 @@ mod tests {
     #[test]
     fn git_tracked_defaults_to_true() {
         let f = tracked_fixture();
-        let mut loaded = config(&f, vec![("p", vec![group(None, &["*"], "out")])]);
+        let mut loaded = config(&f, vec![("p", vec![group(Some("."), &["*"], "out")])]);
         loaded.config.git_tracked = None;
 
         assert_eq!(
@@ -598,7 +598,7 @@ mod tests {
     #[test]
     fn git_tracked_is_overridden_by_package_then_link_group() {
         let f = tracked_fixture();
-        let mut loaded = config(&f, vec![("p", vec![group(None, &["*"], "out")])]);
+        let mut loaded = config(&f, vec![("p", vec![group(Some("."), &["*"], "out")])]);
         loaded.config.git_tracked = None;
         let package = loaded.config.packages.get_mut("p").unwrap();
         package.git_tracked = Some(false);
@@ -612,14 +612,14 @@ mod tests {
     #[test]
     fn git_tracked_off_links_untracked_files() {
         let f = tracked_fixture();
-        let loaded = config(&f, vec![("p", vec![group(None, &["*"], "out")])]);
+        let loaded = config(&f, vec![("p", vec![group(Some("."), &["*"], "out")])]);
         assert_eq!(f.expand(&loaded).unwrap()["p"].len(), 2);
     }
 
     #[test]
     fn git_tracked_fails_outside_a_repo() {
         let f = fixture(&["a"]);
-        let mut loaded = config(&f, vec![("p", vec![group(None, &["*"], "out")])]);
+        let mut loaded = config(&f, vec![("p", vec![group(Some("."), &["*"], "out")])]);
         loaded.config.git_tracked = None;
         assert!(f.expand(&loaded).is_err());
     }
@@ -627,7 +627,10 @@ mod tests {
     #[test]
     fn same_target_from_same_source_is_allowed() {
         let f = fixture(&["a.txt"]);
-        let loaded = config(&f, vec![("p", vec![group(None, &["*.txt", "a.*"], "out")])]);
+        let loaded = config(
+            &f,
+            vec![("p", vec![group(Some("."), &["*.txt", "a.*"], "out")])],
+        );
         assert_eq!(f.expand(&loaded).unwrap()["p"].len(), 1);
     }
 
@@ -653,8 +656,8 @@ mod tests {
         let loaded = config(
             &f,
             vec![
-                ("p", vec![group(None, &["*.txt"], "out")]),
-                ("q", vec![group(None, &["*.txt"], "out")]),
+                ("p", vec![group(Some("."), &["*.txt"], "out")]),
+                ("q", vec![group(Some("."), &["*.txt"], "out")]),
             ],
         );
         assert!(f.expand(&loaded).is_err());
@@ -666,7 +669,7 @@ mod tests {
         std::fs::create_dir_all(f.repo.join("out")).unwrap();
         std::os::unix::fs::symlink("../.symsync.state/links/x", f.repo.join("out/a.txt")).unwrap();
 
-        let loaded = config(&f, vec![("p", vec![group(None, &["**/*"], "out")])]);
+        let loaded = config(&f, vec![("p", vec![group(Some("."), &["**/*"], "out")])]);
 
         assert_eq!(
             f.expand(&loaded).unwrap()["p"],
@@ -677,7 +680,7 @@ mod tests {
     #[test]
     fn skips_config_file() {
         let f = fixture(&["symsync.toml", "a.txt"]);
-        let loaded = config(&f, vec![("p", vec![group(None, &["*"], "out")])]);
+        let loaded = config(&f, vec![("p", vec![group(Some("."), &["*"], "out")])]);
 
         assert_eq!(
             f.expand(&loaded).unwrap()["p"],
@@ -690,7 +693,7 @@ mod tests {
         let f = fixture(&["a.txt"]);
         let loaded = config(
             &f,
-            vec![("p", vec![group(None, &["*.txt", "*.md"], "out")])],
+            vec![("p", vec![group(Some("."), &["*.txt", "*.md"], "out")])],
         );
 
         let expansion = expand(&loaded, &f.home, &f.state).unwrap();
