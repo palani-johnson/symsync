@@ -147,7 +147,7 @@ A package has `links`, its list of link groups, and an optional `git_tracked` th
 Each link group has these fields:
 
 - `root`: the directory that the source globs are relative to. The default is the config directory.
-- `sources`: globs that select source files.
+- `sources`: globs that select source files. The default is `["**/*"]`, every file in `root`.
 - `target`: the target directory. Each match goes to `target` joined with the path of the match relative to `root`. For example, `zed/themes/dark.json` with `root = "zed"` goes to `~/.config/zed/themes/dark.json`.
 - `rename`: an ordered list of rules that give sources a different path at the target (see [Rename](#rename)).
 - `git_tracked`: overrides the package and top-level values (see [Git-tracked files](#git-tracked-files)).
@@ -166,7 +166,6 @@ For each source, symsync uses only the first rule whose `from` matches. A source
 ```toml
 [[packages.zsh.links]]
 root = "zsh"
-sources = ["**/*"]
 target = "~"
 rename = [
   { from = "zshrc.local", to = ".zshrc" },

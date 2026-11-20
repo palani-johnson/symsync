@@ -67,7 +67,7 @@ sources = ["**/*.json"]
 target = "~/.config/zed"
 ```
 
-Globs use the [wax](https://github.com/olson-sean-k/wax) syntax and must be relative to `root`. Wildcards also match names that start with `.`.
+Globs use the [wax](https://github.com/olson-sean-k/wax) syntax and must be relative to `root`. Wildcards also match names that start with `.`. When a link group has no `sources`, it links every file in `root`, as if `sources = ["**/*"]`.
 
 By default, symsync links only files that git tracks, so untracked, ignored and `.git/` files are never sources, and the repo must be a git repo. To also link untracked files, or files outside a git repo, set `git_tracked = false` at the top level of the config, in a package, or in a link group. The most specific value applies.
 
@@ -77,7 +77,6 @@ git_tracked = false
 
 [[packages.scratch.links]]
 root = "scratch"
-sources = ["**/*"]
 target = "~/scratch"
 ```
 

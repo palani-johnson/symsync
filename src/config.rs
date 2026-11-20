@@ -67,7 +67,8 @@ pub struct LinkGroup {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root: Option<PathBuf>,
 
-    /// Globs that select source files.
+    /// Globs that select source files. Defaults to `**/*`, every file in `root`.
+    #[serde(default = "default_sources")]
     pub sources: Vec<String>,
 
     /// Target directory. Each match goes here, at its path relative to `root`.
@@ -80,6 +81,10 @@ pub struct LinkGroup {
     /// Rules that give sources a different path at the target. Only the first rule that matches a source applies, and a source that no rule matches keeps its path.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rename: Vec<Rename>,
+}
+
+fn default_sources() -> Vec<String> {
+    vec!["**/*".to_string()]
 }
 
 /// A rule that gives matching sources a different path at the target.
@@ -254,6 +259,17 @@ packages:
         let config = parse("state_dir = \".state\"", Path::new("symsync.toml")).unwrap();
         assert!(config.packages.is_empty());
         assert!(parse("", Path::new("symsync.toml")).is_ok());
+    }
+
+    #[test]
+    fn sources_default_to_all_files() {
+        let content = r#"
+            [[packages.zsh.links]]
+            root = "zsh"
+            target = "~"
+        "#;
+        let config = parse(content, Path::new("symsync.toml")).unwrap();
+        assert_eq!(config.packages["zsh"].links[0].sources, ["**/*"]);
     }
 
     #[test]
