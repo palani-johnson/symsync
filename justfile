@@ -51,3 +51,19 @@ nix-build:
 # update the flake lock file
 nix-update:
     nix flake update
+
+##
+## GitHub Actions recipes
+##
+
+# lock workflow actions after a change to the workflows
+actions-lock:
+    gh actions-lock --no-narrow
+
+# re-resolve moved tags and update the actions lock file
+actions-relock:
+    gh actions-lock --no-narrow --relock
+
+# check that the actions lock file is up to date
+actions-verify:
+    gh actions-lock --verify
