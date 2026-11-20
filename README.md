@@ -26,6 +26,12 @@ cargo install --path .
 
 Both commands put the `symsync` binary in `~/.cargo/bin`. Make sure that this directory is on your `PATH`.
 
+To install with Nix, add `github:palani-johnson/symsync` as a flake input and use `packages.<system>.default`. The flake also has `packages.<system>.schema`, the JSON schema of the config file. To run symsync without an install:
+
+```sh
+nix run github:palani-johnson/symsync
+```
+
 ## How it works
 
 Every managed file is a chain of two links:
