@@ -1,0 +1,8 @@
+[default]
+_list:
+    @just --list
+
+# rebuild the state and links of this example from source
+update:
+    rm -rf .symsync.state out
+    env -u SYMSYNC_STATE_DIR -u SYMSYNC_LINK_TYPE -u XDG_STATE_HOME cargo run --quiet -- sync

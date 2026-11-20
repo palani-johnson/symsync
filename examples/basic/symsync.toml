@@ -3,5 +3,4 @@ link_type = "relative"
 
 [[packages.basic.links]]
 root = "in"
-sources = ["**/*"]
 target = "out"
