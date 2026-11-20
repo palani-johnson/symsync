@@ -38,6 +38,10 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link_type: Option<LinkType>,
 
+    /// Link only files that git tracks. Packages and link groups can override it. Defaults to true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_tracked: Option<bool>,
+
     /// Packages, keyed by name. Names must be unique in a state directory.
     #[serde(default)]
     pub packages: BTreeMap<String, Package>,
@@ -47,6 +51,10 @@ pub struct Config {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Package {
+    /// Link only files that git tracks. Overrides the config value, and link groups can override it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_tracked: Option<bool>,
+
     /// Link groups of the package.
     pub links: Vec<LinkGroup>,
 }
@@ -65,9 +73,9 @@ pub struct LinkGroup {
     /// Target directory. Each match goes here, at its path relative to `root`.
     pub target: String,
 
-    /// Let wildcards match names that start with `.`. Without this, only a literal `.` in a glob matches them.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub hidden: bool,
+    /// Link only files that git tracks. Overrides the package and config values.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_tracked: Option<bool>,
 
     /// Rules that give sources a different path at the target. Only the first rule that matches a source applies, and a source that no rule matches keeps its path.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

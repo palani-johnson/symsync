@@ -1,6 +1,8 @@
-use std::collections::BTreeMap;
-use std::ops::Range;
+use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
+use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use wax::walk::Entry;
@@ -67,11 +69,26 @@ pub fn expand(loaded: &LoadedConfig, home: &Path, state_dir: &Path) -> Result<Ex
                 .collect::<Result<Vec<_>>>()
                 .with_context(|| format!("invalid rename in package {name}"))?;
             let mut used = vec![false; rules.len()];
+            let git_tracked = group
+                .git_tracked
+                .or(package.git_tracked)
+                .or(loaded.config.git_tracked)
+                .unwrap_or(true);
+            let tracked = if git_tracked {
+                Some(tracked_files(&root).with_context(|| {
+                    format!("failed to list git-tracked files for package {name}")
+                })?)
+            } else {
+                None
+            };
 
             for source in &group.sources {
                 let mut matched = false;
-                for path in matches(&root, source, group.hidden)? {
+                for path in matches(&root, source)? {
                     if path == loaded.path || belongs_to_state(&path, state_dir) {
+                        continue;
+                    }
+                    if tracked.as_ref().is_some_and(|files| !files.contains(&path)) {
                         continue;
                     }
                     matched = true;
@@ -134,8 +151,35 @@ fn belongs_to_state(path: &Path, state_dir: &Path) -> bool {
     })
 }
 
-/// Files that match `pattern` under `root`, normalized. Unless `hidden` is set, a name that starts with `.` matches only a literal `.` in the pattern.
-fn matches(root: &Path, pattern: &str, hidden: bool) -> Result<Vec<PathBuf>> {
+/// Files under `root` that are in the git index, normalized.
+fn tracked_files(root: &Path) -> Result<BTreeSet<PathBuf>> {
+    if !root.is_dir() {
+        return Ok(BTreeSet::new());
+    }
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files", "-z"])
+        .output()
+        .context("failed to run git")?;
+    if !output.status.success() {
+        bail!(
+            "git ls-files in {} failed: {}",
+            root.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    Ok(output
+        .stdout
+        .split(|&b| b == 0)
+        .filter(|rel| !rel.is_empty())
+        .map(|rel| normalize(&root.join(OsStr::from_bytes(rel))))
+        .collect())
+}
+
+/// Files that match `pattern` under `root`, normalized.
+fn matches(root: &Path, pattern: &str) -> Result<Vec<PathBuf>> {
     let glob = Glob::new(pattern).with_context(|| format!("invalid glob {pattern}"))?;
     if pattern.starts_with('/') || glob.has_semantic_literals() {
         bail!("glob {pattern} must be relative to root, without . or .. components");
@@ -148,52 +192,11 @@ fn matches(root: &Path, pattern: &str, hidden: bool) -> Result<Vec<PathBuf>> {
     for entry in glob.walk(root) {
         let entry = entry.with_context(|| format!("failed to read a match of {pattern}"))?;
         let path = entry.path();
-        if !path.is_file() {
-            continue;
+        if path.is_file() {
+            files.push(normalize(path));
         }
-        if !hidden {
-            let rel = relative_text(path, root)?;
-            if !dots_are_literal(&glob, pattern, rel) {
-                continue;
-            }
-        }
-        files.push(normalize(path));
     }
     Ok(files)
-}
-
-fn relative_text<'p>(path: &'p Path, root: &Path) -> Result<&'p str> {
-    path.strip_prefix(root)
-        .ok()
-        .and_then(Path::to_str)
-        .with_context(|| format!("{} is not a UTF-8 path in {}", path.display(), root.display()))
-}
-
-/// Whether every name in `rel` that starts with `.` gets its `.` from a literal in `glob`. An alternation counts as a literal, as in `{.zshrc,.zshenv}`.
-fn dots_are_literal(glob: &Glob, expression: &str, rel: &str) -> bool {
-    let candidate = CandidatePath::from(rel);
-    let Some(matched) = glob.matched(&candidate) else {
-        return false;
-    };
-    // Wax has no leading-dot option, so a dot is not literal when it is inside the text of a wildcard, class or repetition capture.
-    let wild: Vec<Range<usize>> = glob
-        .captures()
-        .filter(|token| !expression[token.span().0..].starts_with('{'))
-        .filter_map(|token| matched.get(token.index()))
-        .map(|text| {
-            let start = text.as_ptr().addr() - rel.as_ptr().addr();
-            start..start + text.len()
-        })
-        .collect();
-
-    hidden_offsets(rel).all(|offset| !wild.iter().any(|range| range.contains(&offset)))
-}
-
-/// Byte offsets of the `.` of each name in `rel` that starts with `.`.
-fn hidden_offsets(rel: &str) -> impl Iterator<Item = usize> + '_ {
-    std::iter::once(0)
-        .chain(rel.match_indices('/').map(|(i, _)| i + 1))
-        .filter(|&i| rel[i..].starts_with('.'))
 }
 
 struct RenameRule {
@@ -358,9 +361,19 @@ mod tests {
             root: root.map(PathBuf::from),
             sources: sources.iter().map(|s| s.to_string()).collect(),
             target: target.into(),
-            hidden: false,
+            git_tracked: None,
             rename: Vec::new(),
         }
+    }
+
+    fn git(repo: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
     }
 
     fn renamed(sources: &[&str], rules: &[(&str, &str)]) -> LinkGroup {
@@ -375,15 +388,23 @@ mod tests {
         group
     }
 
+    /// A config with `git_tracked` off, because most fixtures are not git repos.
     fn config(fixture: &Fixture, packages: Vec<(&str, Vec<LinkGroup>)>) -> LoadedConfig {
         LoadedConfig {
             path: fixture.repo.join("symsync.toml"),
             config: Config {
                 state_dir: None,
                 link_type: None,
+                git_tracked: Some(false),
                 packages: packages
                     .into_iter()
-                    .map(|(name, links)| (name.into(), Package { links }))
+                    .map(|(name, links)| {
+                        let package = Package {
+                            git_tracked: None,
+                            links,
+                        };
+                        (name.into(), package)
+                    })
                     .collect(),
             },
         }
@@ -439,38 +460,20 @@ mod tests {
     }
 
     #[test]
-    fn wildcards_skip_hidden_files_by_default() {
-        let f = fixture(&["a", ".hidden", ".git/config", "dir/.hidden"]);
-        let loaded = config(&f, vec![("p", vec![group(None, &["**/*"], "out")])]);
-
-        assert_eq!(
-            f.expand(&loaded).unwrap()["p"],
-            Targets::from([(f.repo.join("out/a"), f.repo.join("a"))])
-        );
-    }
-
-    #[test]
-    fn literal_dot_matches_hidden_files() {
-        let f = fixture(&["zsh/.zshrc", "zsh/.zshenv", "zsh/README"]);
-        let loaded = config(&f, vec![("zsh", vec![group(Some("zsh"), &[".zsh*"], "~")])]);
-
-        assert_eq!(f.expand(&loaded).unwrap()["zsh"].len(), 2);
-    }
-
-    #[test]
-    fn hidden_lets_wildcards_match_hidden_files() {
+    fn wildcards_match_hidden_files() {
         let f = fixture(&["a", ".hidden", "dir/.hidden"]);
-        let mut hidden = group(None, &["**/*"], "out");
-        hidden.hidden = true;
-        let loaded = config(&f, vec![("p", vec![hidden])]);
+        let loaded = config(&f, vec![("p", vec![group(None, &["**/*"], "out")])]);
 
         assert_eq!(f.expand(&loaded).unwrap()["p"].len(), 3);
     }
 
     #[test]
-    fn alternation_dots_are_literal() {
+    fn alternations_select_files() {
         let f = fixture(&[".zshrc", ".zshenv", ".other"]);
-        let loaded = config(&f, vec![("p", vec![group(None, &["{.zshrc,.zshenv}"], "out")])]);
+        let loaded = config(
+            &f,
+            vec![("p", vec![group(None, &["{.zshrc,.zshenv}"], "out")])],
+        );
 
         assert_eq!(f.expand(&loaded).unwrap()["p"].len(), 2);
     }
@@ -573,6 +576,54 @@ mod tests {
         assert_eq!(expansion.warnings.len(), 2, "{:?}", expansion.warnings);
     }
 
+    fn tracked_fixture() -> Fixture {
+        let f = fixture(&["a", "b"]);
+        git(&f.repo, &["init", "-q"]);
+        git(&f.repo, &["add", "a"]);
+        f
+    }
+
+    #[test]
+    fn git_tracked_defaults_to_true() {
+        let f = tracked_fixture();
+        let mut loaded = config(&f, vec![("p", vec![group(None, &["*"], "out")])]);
+        loaded.config.git_tracked = None;
+
+        assert_eq!(
+            f.expand(&loaded).unwrap()["p"],
+            Targets::from([(f.repo.join("out/a"), f.repo.join("a"))])
+        );
+    }
+
+    #[test]
+    fn git_tracked_is_overridden_by_package_then_link_group() {
+        let f = tracked_fixture();
+        let mut loaded = config(&f, vec![("p", vec![group(None, &["*"], "out")])]);
+        loaded.config.git_tracked = None;
+        let package = loaded.config.packages.get_mut("p").unwrap();
+        package.git_tracked = Some(false);
+        assert_eq!(f.expand(&loaded).unwrap()["p"].len(), 2);
+
+        let package = loaded.config.packages.get_mut("p").unwrap();
+        package.links[0].git_tracked = Some(true);
+        assert_eq!(f.expand(&loaded).unwrap()["p"].len(), 1);
+    }
+
+    #[test]
+    fn git_tracked_off_links_untracked_files() {
+        let f = tracked_fixture();
+        let loaded = config(&f, vec![("p", vec![group(None, &["*"], "out")])]);
+        assert_eq!(f.expand(&loaded).unwrap()["p"].len(), 2);
+    }
+
+    #[test]
+    fn git_tracked_fails_outside_a_repo() {
+        let f = fixture(&["a"]);
+        let mut loaded = config(&f, vec![("p", vec![group(None, &["*"], "out")])]);
+        loaded.config.git_tracked = None;
+        assert!(f.expand(&loaded).is_err());
+    }
+
     #[test]
     fn same_target_from_same_source_is_allowed() {
         let f = fixture(&["a.txt"]);
@@ -615,9 +666,7 @@ mod tests {
         std::fs::create_dir_all(f.repo.join("out")).unwrap();
         std::os::unix::fs::symlink("../.symsync.state/links/x", f.repo.join("out/a.txt")).unwrap();
 
-        let mut all = group(None, &["**/*"], "out");
-        all.hidden = true;
-        let loaded = config(&f, vec![("p", vec![all])]);
+        let loaded = config(&f, vec![("p", vec![group(None, &["**/*"], "out")])]);
 
         assert_eq!(
             f.expand(&loaded).unwrap()["p"],

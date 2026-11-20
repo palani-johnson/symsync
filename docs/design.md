@@ -136,20 +136,23 @@ sources = ["*.json"]
 target = "~/.config/zed"
 ```
 
-The config has these top-level settings, which are both optional:
+The config has these top-level settings, which are all optional:
 
 - `state_dir`: the state directory, relative to the config file (see [State directory](#state-directory)).
 - `link_type`: `absolute` or `relative` (see [Link type](#link-type)).
+- `git_tracked`: link only files that git tracks (see [Git-tracked files](#git-tracked-files)).
+
+A package has `links`, its list of link groups, and an optional `git_tracked` that overrides the top-level value.
 
 Each link group has these fields:
 
 - `root`: the directory that the source globs are relative to. The default is the config directory.
 - `sources`: globs that select source files.
 - `target`: the target directory. Each match goes to `target` joined with the path of the match relative to `root`. For example, `zed/themes/dark.json` with `root = "zed"` goes to `~/.config/zed/themes/dark.json`.
-- `hidden`: when `true`, wildcards also match names that start with `.`. The default is `false`: wildcards skip hidden files and directories (so `**/*` does not go into `.git/`), and only a literal `.` in a glob matches them, as in `.zshrc`, `.*`, `{.zshrc,.zshenv}` or `.config/**/*`.
 - `rename`: an ordered list of rules that give sources a different path at the target (see [Rename](#rename)).
+- `git_tracked`: overrides the package and top-level values (see [Git-tracked files](#git-tracked-files)).
 
-Globs use the [wax](https://github.com/olson-sean-k/wax) syntax. A glob must be relative to `root`, so a glob that starts with `/` or has a `.` or `..` component is an error. Globs select only files. Symsync does not link directories.
+Globs use the [wax](https://github.com/olson-sean-k/wax) syntax. A glob must be relative to `root`, so a glob that starts with `/` or has a `.` or `..` component is an error. Globs select only files. Symsync does not link directories. Wildcards also match names that start with `.`. With the default `git_tracked = true`, the files in `.git/` are still never sources.
 
 ### Rename
 
@@ -158,7 +161,7 @@ By default, a target has the same path as its source, relative to `root`. A rena
 - `from`: a glob that matches the source path relative to `root`.
 - `to`: the target path relative to `target`. `{n}` is the text of capture `n` of `from`, and `{0}` is the whole source path. Each wildcard, class, alternation and repetition in `from` is one capture, numbered from 1 in the order they occur. `{{` and `}}` are literal braces.
 
-For each source, symsync uses only the first rule whose `from` matches. A source that no rule matches keeps its path. Rename rules do not change which files are sources, and `hidden` does not apply to them.
+For each source, symsync uses only the first rule whose `from` matches. A source that no rule matches keeps its path. Rename rules do not change which files are sources.
 
 ```toml
 [[packages.zsh.links]]
@@ -174,6 +177,12 @@ rename = [
 Here `zshrc.local` links to `~/.zshrc`, `dot-zshenv` links to `~/.zshenv`, and `dir/dot-profile` links to `~/dir/.profile`.
 
 A renamed path must be a relative path inside `target`, so a result that is empty or has a `.` or `..` component is an error. When two sources rename to the same target, sync stops with a conflict. A rule that renames no source gives a warning, like a glob that matches no files.
+
+### Git-tracked files
+
+When `git_tracked` is `true`, which is the default, a link group links only the matches that are in the git index of the repo that holds its `root`, as `git ls-files` shows them. Untracked and ignored files, and the files in `.git/`, are not sources. A staged file counts as tracked before its first commit.
+
+The value comes from the link group, then the package, then the top level. The first one that is set applies, and the default is `true`. When the value is `true`, `git` must be on the `PATH` and `root` must be inside a git repo, or `plan` and `sync` stop with an error. To link files from a directory that is not in a git repo, set `git_tracked = false`. When the filter removes every match of a glob, symsync shows the same warning as for a glob that matches no files.
 
 Some files are never sources, even when a glob matches them:
 

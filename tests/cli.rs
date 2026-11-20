@@ -28,7 +28,6 @@ const ZSH_CONFIG: &str = r#"
 root = "zsh"
 sources = ["*"]
 target = "~"
-hidden = true
 "#;
 
 impl Sandbox {
@@ -36,10 +35,29 @@ impl Sandbox {
         self.root.join(rel)
     }
 
+    /// Writes a file. Outside `home`, the first directory of `rel` is a git repo and the file is staged, so that `git_tracked` sees it.
     fn write(&self, rel: &str, content: &str) {
         let path = self.path(rel);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, content).unwrap();
+
+        if let Some((repo, file)) = rel.split_once('/')
+            && repo != "home"
+        {
+            if !self.path(repo).join(".git").exists() {
+                self.git(repo, &["init", "-q"]);
+            }
+            self.git(repo, &["add", "--", file]);
+        }
+    }
+
+    fn git(&self, repo: &str, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .current_dir(self.path(repo))
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
     }
 
     fn read(&self, rel: &str) -> String {

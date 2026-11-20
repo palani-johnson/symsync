@@ -67,7 +67,19 @@ sources = ["**/*.json"]
 target = "~/.config/zed"
 ```
 
-Globs use the [wax](https://github.com/olson-sean-k/wax) syntax and must be relative to `root`. Wildcards do not match names that start with `.`, so `**/*` does not go into `.git/`. A literal `.` in a glob matches them, as in `.*` above. To let wildcards match hidden files too, set `hidden = true` on the link group.
+Globs use the [wax](https://github.com/olson-sean-k/wax) syntax and must be relative to `root`. Wildcards also match names that start with `.`.
+
+By default, symsync links only files that git tracks, so untracked, ignored and `.git/` files are never sources, and the repo must be a git repo. To also link untracked files, or files outside a git repo, set `git_tracked = false` at the top level of the config, in a package, or in a link group. The most specific value applies.
+
+```toml
+[packages.scratch]
+git_tracked = false
+
+[[packages.scratch.links]]
+root = "scratch"
+sources = ["**/*"]
+target = "~/scratch"
+```
 
 To give a source a different path at the target, add `rename` rules to the link group. For each source, only the first rule whose `from` glob matches applies. In `to`, `{n}` is the text of capture `n` of `from`. Each wildcard, class, alternation and repetition is one capture, numbered from 1.
 

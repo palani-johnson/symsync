@@ -17,6 +17,7 @@
         version = cargoToml.package.version;
         src = self;
         cargoLock.lockFile = ./Cargo.lock;
+        nativeCheckInputs = [pkgs.git];
         meta.mainProgram = "symsync";
       };
 
