@@ -4,6 +4,13 @@
   "description": "A symsync config file.",
   "type": "object",
   "properties": {
+    "direct": {
+      "description": "Link targets straight to their sources, without a state link. Packages and link groups can override it. Defaults to false.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
     "git_tracked": {
       "description": "Link only files that git tracks. Packages and link groups can override it. Defaults to true.",
       "type": [
@@ -44,6 +51,13 @@
       "description": "A set of source files that link into one target directory.",
       "type": "object",
       "properties": {
+        "direct": {
+          "description": "Link targets straight to their sources, without a state link. Overrides the package and config values.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "git_tracked": {
           "description": "Link only files that git tracks. Overrides the package and config values.",
           "type": [
@@ -104,6 +118,13 @@
       "description": "A named group of links.",
       "type": "object",
       "properties": {
+        "direct": {
+          "description": "Link targets straight to their sources, without a state link. Overrides the config value, and link groups can override it.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "git_tracked": {
           "description": "Link only files that git tracks. Overrides the config value, and link groups can override it.",
           "type": [

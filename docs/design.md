@@ -36,7 +36,25 @@ This document describes the design of symsync.
 
 The target link never changes after symsync creates it. All changes, such as a repo move or a new source for a target, rewrite only the state link. Symsync controls the state directory fully, so these rewrites are safe.
 
-Any link that resolves through `<state dir>/links/` is managed by symsync. A link that points straight into a repo is not.
+Any link that resolves through `<state dir>/links/` is managed by symsync. A link that points straight into a repo is not, unless it is a [direct link](#direct-links).
+
+## Direct links
+
+Some apps follow only one level of symlinks when they watch a file for changes, so an edit in the repo does not reach the app through the two-link chain. For these files, a link group can set `direct = true`. Then the target link points straight to the source, and the target has no state link:
+
+```
+~/.claude/settings.json  →  ~/dotfiles/claude/settings.json
+       target link                     source
+```
+
+A direct link gives up two properties of the chain:
+
+- It is not self-identifying. Only `packages.toml` shows that symsync manages it.
+- A repo move or a source change rewrites the target link itself, not a state link.
+
+All other rules stay the same. The packages file records each direct target with `direct = true`, and the [link type](#link-type) sets whether the target link is absolute or relative. Sync removes or replaces a direct target link only when it points to the recorded source. A link that already points to the source, but that symsync did not create, is a conflict, as for any other foreign link.
+
+When a target changes between direct and not direct, sync replaces the target link. When a target becomes direct, sync removes its state link after it replaces the target link.
 
 ## Link type
 
@@ -107,6 +125,14 @@ link_type = "absolute"
 
 [packages.zed.targets."/Users/uzz/.config/zed/settings.json"]
 source = "/Users/uzz/dotfiles/zed/settings.json"
+
+[packages.claude]
+config = "/Users/uzz/dotfiles/symsync.toml"
+link_type = "absolute"
+
+[packages.claude.targets."/Users/uzz/.claude/settings.json"]
+source = "/Users/uzz/dotfiles/claude/settings.json"
+direct = true
 ```
 
 Each package records its link type. For a `relative` package, the config, target and source paths are relative to the state directory.
@@ -139,8 +165,9 @@ The config has these top-level settings, which are all optional:
 - `state_dir`: the state directory, relative to the config file (see [State directory](#state-directory)).
 - `link_type`: `absolute` or `relative` (see [Link type](#link-type)).
 - `git_tracked`: link only files that git tracks (see [Git-tracked files](#git-tracked-files)).
+- `direct`: link targets straight to their sources (see [Direct links](#direct-links)).
 
-A package has `links`, its list of link groups, and an optional `git_tracked` that overrides the top-level value.
+A package has `links`, its list of link groups, and optional `git_tracked` and `direct` values that override the top-level values.
 
 Each link group has these fields:
 
@@ -149,6 +176,7 @@ Each link group has these fields:
 - `target`: the target directory. Each match goes to `target` joined with the path of the match relative to `root`. For example, `zed/themes/dark.json` with `root = "zed"` goes to `~/.config/zed/themes/dark.json`.
 - `rename`: an ordered list of rules that give sources a different path at the target (see [Rename](#rename)).
 - `git_tracked`: overrides the package and top-level values (see [Git-tracked files](#git-tracked-files)).
+- `direct`: overrides the package and top-level values. The first value that is set applies, and the default is `false`.
 
 Globs use the [wax](https://github.com/olson-sean-k/wax) syntax. A glob must be relative to `root`, so a glob that starts with `/` or has a `.` or `..` component is an error. Globs select only files. Symsync does not link directories. Wildcards also match names that start with `.`. With the default `git_tracked = true`, the files in `.git/` are still never sources.
 
@@ -215,9 +243,9 @@ Sync does these steps for the packages in one config:
    - **Removed target:** remove the target link (only if it still points to the expected state link), then remove the state link. If the target is no longer a symsync link, sync leaves it in place and shows a note.
    - **Changed source:** rewrite the state link only.
    - **Unchanged target:** check the health of both links. Rewrite the state link if the repo moved.
-5. Before any change, write each changed package to `packages.toml` with the union of its old and new targets. Then apply the changes, write the final records, and release the lock.
+5. Before any change, write each changed package to `packages.toml` with the union of its old and new targets. A target in both keeps its old record. Then apply the changes, write the final records, and release the lock.
 
-Because of step 5, every link that can be on disk is recorded, even when a change fails or the process stops. The next sync then removes any extra links with the usual safety rule.
+Because of step 5, every link that can be on disk is recorded, even when a change fails or the process stops. The next sync then removes any extra links with the usual safety rule. A target link of a recorded target also counts as managed when it points straight to its recorded or its new source, because a sync that stops partway can leave either one while it switches a target to or from a direct link.
 
 When the last entry in a directory is unlinked, sync shows a note. Symsync does not remove directories.
 
@@ -262,14 +290,14 @@ Symsync never adopts a file automatically.
 - **missing link:** there is nothing at the target. Sync creates the link again.
 - **drifted:** the target is a regular file (see [Drift](#drift)). Sync reports a conflict.
 - **exists:** the target is a directory or another file that is not a link. Sync reports a conflict.
-- **foreign link:** the target is a link that does not point to its state link. Sync reports a conflict.
-- **missing state link:** the state link does not exist. Sync creates it again.
-- **wrong state link:** the state link does not point to the recorded source. Sync rewrites it.
+- **foreign link:** the target is a link that does not point to its state link, or to its source for a direct link. Sync reports a conflict.
+- **missing state link:** the state link does not exist. Sync creates it again. Not used for direct links.
+- **wrong state link:** the state link does not point to the recorded source. Sync rewrites it. Not used for direct links.
 - **missing source:** the source file does not exist. Its glob no longer matches it, so sync unlinks the target.
 
 ## Stray state links
 
-A stray state link is an entry in `links/` that no package records, for example after manual changes to the state directory. `status` lists stray state links, and `symsync prune` removes them. Prune removes only symlinks, and leaves other files in place with a note.
+A stray state link is an entry in `links/` that no package records, or the state link of a direct target, for example after manual changes to the state directory. `status` lists stray state links, and `symsync prune` removes them. Prune removes only symlinks, and leaves other files in place with a note.
 
 ## Paths
 

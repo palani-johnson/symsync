@@ -93,6 +93,7 @@ mod tests {
                 state_dir: state_dir.map(PathBuf::from),
                 link_type,
                 git_tracked: None,
+                direct: None,
                 packages: BTreeMap::new(),
             },
         }

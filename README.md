@@ -73,6 +73,16 @@ git_tracked = false
 target = "~/scratch"
 ```
 
+Some apps follow only one level of symlinks, so they do not see changes through the two-link chain. For these files, set `direct = true` at the top level of the config, in a package, or in a link group. The target link then points straight to the source, without a state link. The most specific value applies, and the default is `false`. A direct link is not self-identifying, and a repo move or a source change rewrites the target link itself, but `packages.toml` still records it, so symsync still removes only links that it created.
+
+```toml
+[packages.claude]
+direct = true
+
+[[packages.claude.links]]
+target = "~/.claude"
+```
+
 To give a source a different path at the target, add `rename` rules to the link group. For each source, only the first rule whose `from` glob matches applies. In `to`, `{n}` is the text of capture `n` of `from`. Each wildcard, class, alternation and repetition is one capture, numbered from 1.
 
 ```toml

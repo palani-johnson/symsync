@@ -12,7 +12,14 @@ use crate::config::{LoadedConfig, Rename};
 use crate::paths::{display, normalize, resolve};
 
 /// Source of each target, keyed by target. All paths are absolute.
-pub type Targets = BTreeMap<PathBuf, PathBuf>;
+pub type Targets = BTreeMap<PathBuf, Source>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Source {
+    pub path: PathBuf,
+    /// The target links straight to the source, without a state link.
+    pub direct: bool,
+}
 
 /// The targets that each package wants.
 #[derive(Debug, Default)]
@@ -34,7 +41,7 @@ pub fn check_contained(
             packages
                 .values()
                 .flat_map(|targets| targets.iter())
-                .flat_map(|(target, source)| [target.as_path(), source.as_path()]),
+                .flat_map(|(target, source)| [target.as_path(), source.path.as_path()]),
         )
         .find(|path| !path.starts_with(dir));
 
@@ -51,7 +58,7 @@ pub fn check_contained(
 /// Expands the globs of every package in the config into the targets the package wants. The config file and files that belong to the state directory at `state_dir` are never sources.
 pub fn expand(loaded: &LoadedConfig, home: &Path, state_dir: &Path) -> Result<Expansion> {
     let mut expansion = Expansion::default();
-    let mut owners: BTreeMap<PathBuf, (String, PathBuf)> = BTreeMap::new();
+    let mut owners: BTreeMap<PathBuf, (String, Source)> = BTreeMap::new();
 
     for (name, package) in &loaded.config.packages {
         let mut targets = Targets::new();
@@ -74,6 +81,11 @@ pub fn expand(loaded: &LoadedConfig, home: &Path, state_dir: &Path) -> Result<Ex
                 .or(package.git_tracked)
                 .or(loaded.config.git_tracked)
                 .unwrap_or(true);
+            let direct = group
+                .direct
+                .or(package.direct)
+                .or(loaded.config.direct)
+                .unwrap_or(false);
             let tracked = if git_tracked {
                 Some(tracked_files(&root).with_context(|| {
                     format!("failed to list git-tracked files for package {name}")
@@ -98,19 +110,20 @@ pub fn expand(loaded: &LoadedConfig, home: &Path, state_dir: &Path) -> Result<Ex
                     let rel = rename(&rules, rel, &mut used)
                         .with_context(|| format!("failed to rename in package {name}"))?;
                     let target = normalize(&target_dir.join(rel));
+                    let source = Source { path, direct };
 
                     if let Some((owner, owner_source)) = owners.get(&target)
-                        && (owner != name || owner_source != &path)
+                        && (owner != name || owner_source != &source)
                     {
                         bail!(
                             "target {} is wanted by {} (package {owner}) and {} (package {name})",
                             target.display(),
-                            owner_source.display(),
-                            path.display()
+                            owner_source.path.display(),
+                            source.path.display()
                         );
                     }
-                    owners.insert(target.clone(), (name.clone(), path.clone()));
-                    targets.insert(target, path);
+                    owners.insert(target.clone(), (name.clone(), source.clone()));
+                    targets.insert(target, source);
                 }
                 if !matched {
                     expansion.warnings.push((
@@ -326,6 +339,8 @@ mod tests {
     use super::*;
     use crate::config::{Config, LinkGroup, Package};
 
+    type Paths = BTreeMap<PathBuf, PathBuf>;
+
     struct Fixture {
         _tmp: tempfile::TempDir,
         repo: PathBuf,
@@ -334,8 +349,16 @@ mod tests {
     }
 
     impl Fixture {
-        fn expand(&self, loaded: &LoadedConfig) -> Result<BTreeMap<String, Targets>> {
-            expand(loaded, &self.home, &self.state).map(|e| e.packages)
+        /// Source path of each target, keyed by package.
+        fn expand(&self, loaded: &LoadedConfig) -> Result<BTreeMap<String, Paths>> {
+            let packages = expand(loaded, &self.home, &self.state)?.packages;
+            Ok(packages
+                .into_iter()
+                .map(|(name, targets)| {
+                    let paths = targets.into_iter().map(|(t, s)| (t, s.path)).collect();
+                    (name, paths)
+                })
+                .collect())
         }
     }
 
@@ -362,6 +385,7 @@ mod tests {
             sources: sources.iter().map(|s| s.to_string()).collect(),
             target: target.into(),
             git_tracked: None,
+            direct: None,
             rename: Vec::new(),
         }
     }
@@ -396,11 +420,13 @@ mod tests {
                 state_dir: None,
                 link_type: None,
                 git_tracked: Some(false),
+                direct: None,
                 packages: packages
                     .into_iter()
                     .map(|(name, links)| {
                         let package = Package {
                             git_tracked: None,
+                            direct: None,
                             links,
                         };
                         (name.into(), package)
@@ -424,7 +450,7 @@ mod tests {
         let targets = &f.expand(&loaded).unwrap()["zed"];
         assert_eq!(
             targets,
-            &Targets::from([
+            &Paths::from([
                 (
                     f.home.join(".config/zed/settings.json"),
                     f.repo.join("zed/settings.json")
@@ -444,7 +470,7 @@ mod tests {
 
         assert_eq!(
             f.expand(&loaded).unwrap()["p"],
-            Targets::from([(f.repo.join("out/a.txt"), f.repo.join("p/a.txt"))])
+            Paths::from([(f.repo.join("out/a.txt"), f.repo.join("p/a.txt"))])
         );
     }
 
@@ -455,7 +481,7 @@ mod tests {
 
         assert_eq!(
             f.expand(&loaded).unwrap()["zsh"],
-            Targets::from([(f.home.join("zshrc"), f.repo.join("zsh/zshrc"))])
+            Paths::from([(f.home.join("zshrc"), f.repo.join("zsh/zshrc"))])
         );
     }
 
@@ -505,7 +531,7 @@ mod tests {
 
         assert_eq!(
             f.expand(&loaded).unwrap()["p"],
-            Targets::from([
+            Paths::from([
                 (f.repo.join("out/zshrc"), f.repo.join("dot-zshrc")),
                 (f.repo.join("out/.zshenv"), f.repo.join("dot-zshenv")),
                 (f.repo.join("out/README"), f.repo.join("README")),
@@ -523,7 +549,7 @@ mod tests {
 
         assert_eq!(
             f.expand(&loaded).unwrap()["p"],
-            Targets::from([
+            Paths::from([
                 (f.repo.join("out/.a"), f.repo.join("dot-a")),
                 (f.repo.join("out/dir/.b"), f.repo.join("dir/dot-b")),
             ])
@@ -537,7 +563,7 @@ mod tests {
 
         assert_eq!(
             f.expand(&loaded).unwrap()["p"],
-            Targets::from([(f.repo.join("out/{a}"), f.repo.join("a"))])
+            Paths::from([(f.repo.join("out/{a}"), f.repo.join("a"))])
         );
     }
 
@@ -591,7 +617,7 @@ mod tests {
 
         assert_eq!(
             f.expand(&loaded).unwrap()["p"],
-            Targets::from([(f.repo.join("out/a"), f.repo.join("a"))])
+            Paths::from([(f.repo.join("out/a"), f.repo.join("a"))])
         );
     }
 
@@ -622,6 +648,28 @@ mod tests {
         let mut loaded = config(&f, vec![("p", vec![group(Some("."), &["*"], "out")])]);
         loaded.config.git_tracked = None;
         assert!(f.expand(&loaded).is_err());
+    }
+
+    #[test]
+    fn direct_defaults_to_false_and_is_overridden_by_package_then_link_group() {
+        let f = fixture(&["a"]);
+        let mut loaded = config(&f, vec![("p", vec![group(Some("."), &["*"], "out")])]);
+        let direct = |loaded: &LoadedConfig| {
+            let expansion = expand(loaded, &f.home, &f.state).unwrap();
+            expansion.packages["p"][&f.repo.join("out/a")].direct
+        };
+        assert!(!direct(&loaded));
+
+        loaded.config.direct = Some(true);
+        assert!(direct(&loaded));
+
+        let package = loaded.config.packages.get_mut("p").unwrap();
+        package.direct = Some(false);
+        assert!(!direct(&loaded));
+
+        let package = loaded.config.packages.get_mut("p").unwrap();
+        package.links[0].direct = Some(true);
+        assert!(direct(&loaded));
     }
 
     #[test]
@@ -673,7 +721,7 @@ mod tests {
 
         assert_eq!(
             f.expand(&loaded).unwrap()["p"],
-            Targets::from([(f.repo.join("out/a.txt"), f.repo.join("a.txt"))])
+            Paths::from([(f.repo.join("out/a.txt"), f.repo.join("a.txt"))])
         );
     }
 
@@ -684,7 +732,7 @@ mod tests {
 
         assert_eq!(
             f.expand(&loaded).unwrap()["p"],
-            Targets::from([(f.repo.join("out/a.txt"), f.repo.join("a.txt"))])
+            Paths::from([(f.repo.join("out/a.txt"), f.repo.join("a.txt"))])
         );
     }
 
@@ -710,12 +758,16 @@ mod tests {
     #[test]
     fn contained_paths_pass_and_others_fail() {
         let f = fixture(&["a.txt"]);
-        let inside = Targets::from([(f.repo.join("out/a.txt"), f.repo.join("a.txt"))]);
+        let source = |path: PathBuf| Source {
+            path,
+            direct: false,
+        };
+        let inside = Targets::from([(f.repo.join("out/a.txt"), source(f.repo.join("a.txt")))]);
         let packages = BTreeMap::from([("p".to_string(), inside)]);
         assert!(check_contained(&packages, &f.state, &f.repo, &f.home).is_ok());
         assert!(check_contained(&packages, &f.home.join("state"), &f.repo, &f.home).is_err());
 
-        let outside = Targets::from([(f.home.join("a.txt"), f.repo.join("a.txt"))]);
+        let outside = Targets::from([(f.home.join("a.txt"), source(f.repo.join("a.txt")))]);
         let packages = BTreeMap::from([("p".to_string(), outside)]);
         assert!(check_contained(&packages, &f.state, &f.repo, &f.home).is_err());
     }

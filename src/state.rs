@@ -6,6 +6,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::config::LinkType;
+use crate::desired::{Source, Targets};
 use crate::paths::{normalize, relative, state_link_name};
 
 const VERSION: u32 = 1;
@@ -18,8 +19,7 @@ const LOCK_FILE: &str = "lock";
 pub struct PackageRecord {
     pub config: PathBuf,
     pub link_type: LinkType,
-    /// Source of each target, keyed by target.
-    pub targets: BTreeMap<PathBuf, PathBuf>,
+    pub targets: Targets,
 }
 
 /// The state directory, held under a lock while open.
@@ -100,8 +100,9 @@ impl State {
         let recorded: HashSet<PathBuf> = self
             .packages
             .values()
-            .flat_map(|record| record.targets.keys())
-            .map(|target| self.link_path(target))
+            .flat_map(|record| record.targets.iter())
+            .filter(|(_, source)| !source.direct)
+            .map(|(target, _)| self.link_path(target))
             .collect();
 
         let mut stray = Vec::new();
@@ -179,6 +180,8 @@ struct StoredPackage {
 #[derive(Debug, Serialize, Deserialize)]
 struct StoredTarget {
     source: PathBuf,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    direct: bool,
 }
 
 fn read_packages(dir: &Path) -> Result<BTreeMap<String, PackageRecord>> {
@@ -222,7 +225,8 @@ fn to_stored(record: &PackageRecord, dir: &Path) -> StoredPackage {
                 (
                     store(target),
                     StoredTarget {
-                        source: store(source),
+                        source: store(&source.path),
+                        direct: source.direct,
                     },
                 )
             })
@@ -239,7 +243,13 @@ fn from_stored(stored: StoredPackage, dir: &Path) -> PackageRecord {
         targets: stored
             .targets
             .into_iter()
-            .map(|(target, stored)| (load(target), load(stored.source)))
+            .map(|(target, stored)| {
+                let source = Source {
+                    path: load(stored.source),
+                    direct: stored.direct,
+                };
+                (load(target), source)
+            })
             .collect(),
     }
 }
@@ -252,7 +262,22 @@ mod tests {
         PackageRecord {
             config: root.join("repo/symsync.toml"),
             link_type,
-            targets: BTreeMap::from([(root.join("home/.zshrc"), root.join("repo/zsh/.zshrc"))]),
+            targets: Targets::from([
+                (
+                    root.join("home/.zshrc"),
+                    Source {
+                        path: root.join("repo/zsh/.zshrc"),
+                        direct: false,
+                    },
+                ),
+                (
+                    root.join("home/.zshenv"),
+                    Source {
+                        path: root.join("repo/zsh/.zshenv"),
+                        direct: true,
+                    },
+                ),
+            ]),
         }
     }
 
@@ -348,14 +373,17 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut state = State::open(&tmp.path().join("state")).unwrap();
         let expected = record(tmp.path(), LinkType::Absolute);
-        let target = expected.targets.keys().next().unwrap().clone();
         state.packages.insert("zsh".into(), expected);
 
-        let recorded = state.link_path(&target);
+        let recorded = state.link_path(&tmp.path().join("home/.zshrc"));
+        let direct = state.link_path(&tmp.path().join("home/.zshenv"));
         let stray = state.links_dir().join("stray");
-        std::os::unix::fs::symlink("/x", &recorded).unwrap();
-        std::os::unix::fs::symlink("/x", &stray).unwrap();
+        for link in [&recorded, &direct, &stray] {
+            std::os::unix::fs::symlink("/x", link).unwrap();
+        }
 
-        assert_eq!(state.stray_links().unwrap(), [stray]);
+        let mut expected = vec![direct, stray];
+        expected.sort();
+        assert_eq!(state.stray_links().unwrap(), expected);
     }
 }

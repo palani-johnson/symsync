@@ -9,7 +9,7 @@ use crate::state::{PackageRecord, State};
 
 /// Runs the steps of a plan and saves its package records.
 ///
-/// Before any change, each changed package is saved with the union of its old and new targets. If a step fails, every link that can be on disk is still recorded, and the next sync cleans up.
+/// Before any change, each changed package is saved with the union of its old and new targets, and a target in both keeps its old source. If a step fails, every link that can be on disk is still recorded, and the next sync cleans up.
 pub fn apply(
     state: &mut State,
     steps: &[Step],
@@ -22,10 +22,7 @@ pub fn apply(
             let mut merged = new.clone();
             if let Some(old) = state.packages.get(name) {
                 for (target, source) in &old.targets {
-                    merged
-                        .targets
-                        .entry(target.clone())
-                        .or_insert_with(|| source.clone());
+                    merged.targets.insert(target.clone(), source.clone());
                 }
             }
             state.packages.insert(name.clone(), merged);
@@ -229,7 +226,13 @@ mod tests {
             link_type: crate::config::LinkType::Absolute,
             targets: targets
                 .iter()
-                .map(|t| (tmp.path().join(t), tmp.path().join("source")))
+                .map(|t| {
+                    let source = crate::desired::Source {
+                        path: tmp.path().join("source"),
+                        direct: false,
+                    };
+                    (tmp.path().join(t), source)
+                })
                 .collect(),
         };
 
@@ -256,7 +259,7 @@ mod tests {
             PackageRecord {
                 config: tmp.path().join("symsync.toml"),
                 link_type: crate::config::LinkType::Absolute,
-                targets: BTreeMap::new(),
+                targets: Default::default(),
             },
         );
 
