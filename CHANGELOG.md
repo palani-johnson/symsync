@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2](https://github.com/palani-johnson/symsync/compare/v0.1.1...v0.1.2) - 2026-11-24
+
+### Added
+
+- add direct links that bypass the state link ([#5](https://github.com/palani-johnson/symsync/pull/5))
+- add the config JSON schema to the repo ([#3](https://github.com/palani-johnson/symsync/pull/3))
+
 ## [0.1.1](https://github.com/palani-johnson/symsync/compare/v0.1.0...v0.1.1) - 2026-11-20
 
 ### Other
