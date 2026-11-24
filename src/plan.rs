@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::config::LinkType;
-use crate::desired::Targets;
+use crate::desired::{Source, Targets};
 use crate::paths::{display, relative, resolves_to};
 use crate::state::{PackageRecord, State};
 
@@ -129,9 +129,9 @@ pub fn plan(
     for (name, record) in &state.packages {
         match desired.get(name) {
             Some(targets) if owned.contains(name) => {
-                for target in record.targets.keys() {
+                for (target, source) in &record.targets {
                     if !targets.contains_key(target) {
-                        planner.unlink(target);
+                        planner.unlink(target, source);
                     }
                 }
             }
@@ -140,8 +140,8 @@ pub fn plan(
                     .plan
                     .notes
                     .push(format!("package {name} was removed from the config"));
-                for target in record.targets.keys() {
-                    planner.unlink(target);
+                for (target, source) in &record.targets {
+                    planner.unlink(target, source);
                 }
                 planner.plan.records.insert(name.clone(), None);
             }
@@ -176,8 +176,8 @@ pub fn plan(
 pub fn plan_remove(state: &State, name: &str, record: &PackageRecord, home: &Path) -> Plan {
     let mut planner = Planner::new(state, &record.config, record.link_type, home);
 
-    for target in record.targets.keys() {
-        planner.unlink(target);
+    for (target, source) in &record.targets {
+        planner.unlink(target, source);
     }
     planner.plan.records.insert(name.to_string(), None);
 
@@ -199,11 +199,11 @@ pub fn plan_adopt(
         Some(format!(
             "adopt   {} -> {}",
             planner.show(target),
-            planner.show(source)
+            planner.show(&source.path)
         )),
         Action::MoveFile {
             from: target.to_path_buf(),
-            to: source.clone(),
+            to: source.path.clone(),
         },
     );
     planner.removed.insert(target.to_path_buf());
@@ -302,11 +302,27 @@ impl<'a> Planner<'a> {
         self.plan.steps.push(Step { message, action });
     }
 
-    fn unlink(&mut self, target: &Path) {
+    /// Whether the link at `target` with the content `value` is a symsync link. A recorded target can also point straight to its recorded or its wanted source, because a sync that stops partway can leave either one while it switches a target to or from a direct link.
+    fn is_managed(
+        &self,
+        target: &Path,
+        value: &Path,
+        recorded: Option<&Source>,
+        wanted: &Path,
+    ) -> bool {
+        resolves_to(value, target, &self.state.link_path(target))
+            || recorded.is_some_and(|recorded| {
+                resolves_to(value, target, &recorded.path) || resolves_to(value, target, wanted)
+            })
+    }
+
+    fn unlink(&mut self, target: &Path, recorded: &Source) {
         let link = self.state.link_path(target);
 
         match self.inspect(target) {
-            Entry::Link(value) if resolves_to(&value, target, &link) => {
+            Entry::Link(value)
+                if self.is_managed(target, &value, Some(recorded), &recorded.path) =>
+            {
                 self.push(
                     Some(format!("unlink  {}", self.show(target))),
                     Action::RemoveLink(target.to_path_buf()),
@@ -331,7 +347,7 @@ impl<'a> Planner<'a> {
         }
     }
 
-    fn link(&mut self, name: &str, record: Option<&PackageRecord>, target: &Path, source: &Path) {
+    fn link(&mut self, name: &str, record: Option<&PackageRecord>, target: &Path, source: &Source) {
         // A package of this config gives up its targets only when this plan also updates it.
         let owner = self.state.packages.iter().find(|(other, other_record)| {
             let updated = other_record.config == self.config
@@ -348,27 +364,35 @@ impl<'a> Planner<'a> {
 
         let link = self.state.link_path(target);
         let parent = target.parent().unwrap_or(Path::new("/"));
+        let dest = if source.direct { &source.path } else { &link };
         let (state_value, target_value) = match self.link_type {
-            LinkType::Absolute => (source.to_path_buf(), link.clone()),
+            LinkType::Absolute => (source.path.clone(), dest.clone()),
             LinkType::Relative => (
-                relative(source, &self.state.links_dir()),
-                relative(&link, parent),
+                relative(&source.path, &self.state.links_dir()),
+                relative(dest, parent),
             ),
         };
-        let was_managed = record.is_some_and(|record| record.targets.contains_key(target));
+        let recorded = record.and_then(|record| record.targets.get(target));
 
         let target_action = match self.inspect(target) {
             Entry::Missing => Some(Action::CreateLink {
                 path: target.to_path_buf(),
                 value: target_value,
             }),
-            Entry::Link(value) if value == target_value => None,
-            Entry::Link(value) if resolves_to(&value, target, &link) => Some(Action::ReplaceLink {
-                path: target.to_path_buf(),
-                value: target_value,
-            }),
+            // A direct link with this value can also be one that symsync did not create.
+            Entry::Link(value)
+                if value == target_value && (recorded.is_some() || !source.direct) =>
+            {
+                None
+            }
+            Entry::Link(value) if self.is_managed(target, &value, recorded, &source.path) => {
+                Some(Action::ReplaceLink {
+                    path: target.to_path_buf(),
+                    value: target_value,
+                })
+            }
             Entry::Link(_) => return self.conflict(Conflict::ForeignLink(target.to_path_buf())),
-            Entry::File if was_managed => {
+            Entry::File if recorded.is_some() => {
                 return self.conflict(Conflict::Drifted(target.to_path_buf()));
             }
             Entry::File | Entry::Dir => {
@@ -376,17 +400,19 @@ impl<'a> Planner<'a> {
             }
         };
 
-        let state_action = match self.inspect(&link) {
-            Entry::Missing => Some(Action::CreateLink {
+        let state_action = match (self.inspect(&link), source.direct) {
+            (Entry::Missing, true) => None,
+            (Entry::Link(_), true) => Some(Action::RemoveLink(link)),
+            (Entry::Missing, false) => Some(Action::CreateLink {
                 path: link,
                 value: state_value,
             }),
-            Entry::Link(value) if value == state_value => None,
-            Entry::Link(_) => Some(Action::ReplaceLink {
+            (Entry::Link(value), false) if value == state_value => None,
+            (Entry::Link(_), false) => Some(Action::ReplaceLink {
                 path: link,
                 value: state_value,
             }),
-            Entry::File | Entry::Dir => return self.conflict(Conflict::NotALink(link)),
+            (Entry::File | Entry::Dir, _) => return self.conflict(Conflict::NotALink(link)),
         };
 
         let creates_target = matches!(target_action, Some(Action::CreateLink { .. }));
@@ -400,20 +426,36 @@ impl<'a> Planner<'a> {
         };
 
         let verb = if creates_target { "link  " } else { "relink" };
-        let message = format!("{verb}  {} -> {}", self.show(target), self.show(source));
+        let message = format!(
+            "{verb}  {} -> {}",
+            self.show(target),
+            self.show(&source.path)
+        );
 
         match (state_action, target_action) {
             (None, None) => {}
-            (Some(state_action), None) => self.push(Some(message), state_action),
+            // For a direct target, this only removes a leftover state link.
+            (Some(state_action), None) => {
+                self.push((!source.direct).then_some(message), state_action)
+            }
             (state_action, Some(target_action)) => {
-                if let Some(state_action) = state_action {
-                    self.push(None, state_action);
+                // The target link must stop using the state link before a direct target removes it.
+                let (before, after) = if source.direct {
+                    (None, state_action)
+                } else {
+                    (state_action, None)
+                };
+                if let Some(action) = before {
+                    self.push(None, action);
                 }
                 if let Some(Action::CreateDir(dir)) = &dir_action {
                     let line = format!("mkdir   {}", self.show(dir));
                     self.push(Some(line), Action::CreateDir(dir.clone()));
                 }
                 self.push(Some(message), target_action);
+                if let Some(action) = after {
+                    self.push(None, action);
+                }
             }
         }
     }
@@ -486,16 +528,31 @@ mod tests {
             self.root.join(rel)
         }
 
+        fn source(&self, rel: &str, direct: bool) -> Source {
+            Source {
+                path: self.path(rel),
+                direct,
+            }
+        }
+
+        fn targets(&self, targets: &[(&str, &str)], direct: bool) -> Targets {
+            targets
+                .iter()
+                .map(|(target, source)| (self.path(target), self.source(source, direct)))
+                .collect()
+        }
+
         fn desired(&self, packages: &[(&str, &[(&str, &str)])]) -> BTreeMap<String, Targets> {
             packages
                 .iter()
-                .map(|(name, targets)| {
-                    let targets = targets
-                        .iter()
-                        .map(|(target, source)| (self.path(target), self.path(source)))
-                        .collect();
-                    (name.to_string(), targets)
-                })
+                .map(|(name, targets)| (name.to_string(), self.targets(targets, false)))
+                .collect()
+        }
+
+        fn direct(&self, packages: &[(&str, &[(&str, &str)])]) -> BTreeMap<String, Targets> {
+            packages
+                .iter()
+                .map(|(name, targets)| (name.to_string(), self.targets(targets, true)))
                 .collect()
         }
 
@@ -537,10 +594,7 @@ mod tests {
             let record = PackageRecord {
                 config: config.to_path_buf(),
                 link_type: LinkType::Absolute,
-                targets: targets
-                    .iter()
-                    .map(|(target, source)| (self.path(target), self.path(source)))
-                    .collect(),
+                targets: self.targets(targets, false),
             };
             self.state.packages.insert(name.into(), record);
         }
@@ -970,6 +1024,154 @@ mod tests {
             plan.notes,
             ["~/x has no entries left, symsync does not remove directories"]
         );
+    }
+
+    #[test]
+    fn links_direct_target_without_state_link() {
+        let mut f = fixture();
+        let desired = f.direct(&[("p", &[("home/a", "repo/a")])]);
+        let plan = f.plan(LinkType::Absolute, &desired);
+
+        assert_eq!(
+            plan.steps.iter().map(|s| &s.action).collect::<Vec<_>>(),
+            [&Action::CreateLink {
+                path: f.path("home/a"),
+                value: f.path("repo/a")
+            }]
+        );
+        f.apply(plan);
+        assert!(f.state.packages["p"].targets[&f.path("home/a")].direct);
+        assert!(!f.state.link_path(&f.path("home/a")).is_symlink());
+
+        let plan = f.plan(LinkType::Absolute, &desired);
+        assert!(plan.steps.is_empty());
+        assert!(plan.conflicts.is_empty());
+    }
+
+    #[test]
+    fn relative_direct_link_points_to_source() {
+        let mut f = fixture();
+        let plan = f.plan(
+            LinkType::Relative,
+            &f.direct(&[("p", &[("home/a", "repo/a")])]),
+        );
+        f.apply(plan);
+
+        assert_eq!(
+            std::fs::read_link(f.path("home/a")).unwrap(),
+            Path::new("../repo/a")
+        );
+    }
+
+    #[test]
+    fn switches_between_state_link_and_direct_link() {
+        let mut f = fixture();
+        let target = f.path("home/a");
+        let link = f.state.link_path(&target);
+        let plan = f.plan(
+            LinkType::Absolute,
+            &f.desired(&[("p", &[("home/a", "repo/a")])]),
+        );
+        f.apply(plan);
+
+        let plan = f.plan(
+            LinkType::Absolute,
+            &f.direct(&[("p", &[("home/a", "repo/a")])]),
+        );
+        assert_eq!(
+            plan.steps.iter().map(|s| &s.action).collect::<Vec<_>>(),
+            [
+                &Action::ReplaceLink {
+                    path: target.clone(),
+                    value: f.path("repo/a")
+                },
+                &Action::RemoveLink(link.clone()),
+            ]
+        );
+        f.apply(plan);
+        assert!(!link.is_symlink());
+
+        let plan = f.plan(
+            LinkType::Absolute,
+            &f.desired(&[("p", &[("home/a", "repo/a")])]),
+        );
+        assert!(plan.conflicts.is_empty(), "{:?}", plan.conflicts);
+        f.apply(plan);
+        assert_eq!(std::fs::read_link(&target).unwrap(), link);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "a");
+    }
+
+    #[test]
+    fn changed_direct_source_rewrites_target_link() {
+        let mut f = fixture();
+        let plan = f.plan(
+            LinkType::Absolute,
+            &f.direct(&[("p", &[("home/a", "repo/a")])]),
+        );
+        f.apply(plan);
+
+        let plan = f.plan(
+            LinkType::Absolute,
+            &f.direct(&[("p", &[("home/a", "repo/b")])]),
+        );
+        assert_eq!(
+            messages(&plan),
+            [format!("relink  ~/a -> {}", f.path("repo/b").display())]
+        );
+        f.apply(plan);
+        assert_eq!(std::fs::read_to_string(f.path("home/a")).unwrap(), "b");
+    }
+
+    #[test]
+    fn finishes_switch_to_direct_link_that_stopped_partway() {
+        let mut f = fixture();
+        let plan = f.plan(
+            LinkType::Absolute,
+            &f.desired(&[("p", &[("home/a", "repo/a")])]),
+        );
+        f.apply(plan);
+        let link = f.state.link_path(&f.path("home/a"));
+        std::fs::remove_file(f.path("home/a")).unwrap();
+        symlink(f.path("repo/a"), f.path("home/a")).unwrap();
+
+        let plan = f.plan(
+            LinkType::Absolute,
+            &f.direct(&[("p", &[("home/a", "repo/a")])]),
+        );
+        assert!(plan.conflicts.is_empty(), "{:?}", plan.conflicts);
+        assert_eq!(
+            plan.steps.iter().map(|s| &s.action).collect::<Vec<_>>(),
+            [&Action::RemoveLink(link)]
+        );
+    }
+
+    #[test]
+    fn unrecorded_link_to_source_is_a_conflict_for_direct_target() {
+        let f = fixture();
+        symlink(f.path("repo/a"), f.path("home/a")).unwrap();
+
+        let plan = f.plan(
+            LinkType::Absolute,
+            &f.direct(&[("p", &[("home/a", "repo/a")])]),
+        );
+        assert_eq!(plan.conflicts, [Conflict::ForeignLink(f.path("home/a"))]);
+    }
+
+    #[test]
+    fn removes_direct_target() {
+        let mut f = fixture();
+        let plan = f.plan(
+            LinkType::Absolute,
+            &f.direct(&[("p", &[("home/a", "repo/a")])]),
+        );
+        f.apply(plan);
+
+        let record = f.state.packages["p"].clone();
+        let plan = plan_remove(&f.state, "p", &record, &f.home);
+        assert_eq!(messages(&plan), ["unlink  ~/a"]);
+        f.apply(plan);
+        assert!(!f.path("home/a").is_symlink());
+        assert!(f.path("repo/a").is_file());
     }
 
     #[test]

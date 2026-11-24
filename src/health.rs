@@ -1,6 +1,7 @@
 use std::fmt;
 use std::path::Path;
 
+use crate::desired::Source;
 use crate::paths::resolves_to;
 use crate::state::State;
 
@@ -33,8 +34,9 @@ impl fmt::Display for Health {
 }
 
 /// Checks the link chain from `target` to `source`.
-pub fn check(state: &State, target: &Path, source: &Path) -> Health {
+pub fn check(state: &State, target: &Path, source: &Source) -> Health {
     let link = state.link_path(target);
+    let expected = if source.direct { &source.path } else { &link };
 
     match std::fs::symlink_metadata(target) {
         Err(_) => return Health::MissingLink,
@@ -43,17 +45,21 @@ pub fn check(state: &State, target: &Path, source: &Path) -> Health {
         Ok(_) => {}
     }
     match std::fs::read_link(target) {
-        Ok(value) if resolves_to(&value, target, &link) => {}
+        Ok(value) if resolves_to(&value, target, expected) => {}
         _ => return Health::ForeignLink,
     }
 
-    match std::fs::read_link(&link) {
-        Err(_) => return Health::MissingStateLink,
-        Ok(value) if !resolves_to(&value, &link, source) => return Health::WrongStateLink,
-        Ok(_) => {}
+    if !source.direct {
+        match std::fs::read_link(&link) {
+            Err(_) => return Health::MissingStateLink,
+            Ok(value) if !resolves_to(&value, &link, &source.path) => {
+                return Health::WrongStateLink;
+            }
+            Ok(_) => {}
+        }
     }
 
-    if source.is_file() {
+    if source.path.is_file() {
         Health::Ok
     } else {
         Health::MissingSource
@@ -95,7 +101,15 @@ mod tests {
 
     impl Fixture {
         fn check(&self) -> Health {
-            check(&self.state, &self.target, &self.source)
+            self.check_as(false)
+        }
+
+        fn check_as(&self, direct: bool) -> Health {
+            let source = Source {
+                path: self.source.clone(),
+                direct,
+            };
+            check(&self.state, &self.target, &source)
         }
     }
 
@@ -142,6 +156,18 @@ mod tests {
         let f = linked();
         std::fs::remove_file(&f.source).unwrap();
         assert_eq!(f.check(), Health::MissingSource);
+    }
+
+    #[test]
+    fn direct_link_skips_state_link() {
+        let f = linked();
+        assert_eq!(f.check_as(true), Health::ForeignLink);
+
+        std::fs::remove_file(&f.target).unwrap();
+        std::fs::remove_file(&f.link).unwrap();
+        symlink(&f.source, &f.target).unwrap();
+        assert_eq!(f.check_as(true), Health::Ok);
+        assert_eq!(f.check(), Health::ForeignLink);
     }
 
     #[test]

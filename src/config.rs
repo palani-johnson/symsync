@@ -42,6 +42,10 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_tracked: Option<bool>,
 
+    /// Link targets straight to their sources, without a state link. Packages and link groups can override it. Defaults to false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct: Option<bool>,
+
     /// Packages, keyed by name. Names must be unique in a state directory.
     #[serde(default)]
     pub packages: BTreeMap<String, Package>,
@@ -54,6 +58,10 @@ pub struct Package {
     /// Link only files that git tracks. Overrides the config value, and link groups can override it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_tracked: Option<bool>,
+
+    /// Link targets straight to their sources, without a state link. Overrides the config value, and link groups can override it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct: Option<bool>,
 
     /// Link groups of the package.
     pub links: Vec<LinkGroup>,
@@ -77,6 +85,10 @@ pub struct LinkGroup {
     /// Link only files that git tracks. Overrides the package and config values.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_tracked: Option<bool>,
+
+    /// Link targets straight to their sources, without a state link. Overrides the package and config values.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct: Option<bool>,
 
     /// Rules that give sources a different path at the target. Only the first rule that matches a source applies, and a source that no rule matches keeps its path.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
